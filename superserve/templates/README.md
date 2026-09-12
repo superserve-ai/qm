@@ -62,8 +62,9 @@ Bumping a pinned CLI version in `qm-agent.ts` for an already-built release requi
 Set `SUPERSERVE_TEMPLATE=qm-agent-<release>` on the QM deployment (alongside
 `SUPERSERVE_API_KEY`, and `SUPERSERVE_BASE_URL` if not using production). Every scope and
 scratch sandbox the Superserve backend creates is then booted `fromTemplate` that name.
-If `SUPERSERVE_TEMPLATE` is unset the backend boots Superserve's stock `superserve/base`
-template, which only ships `ca-certificates`, `curl`, and `git`.
+`SUPERSERVE_TEMPLATE` is mandatory: core refuses to start with `SANDBOX_BACKEND=superserve`
+and no template, because Superserve's stock image ships only `ca-certificates`, `curl`, and
+`git`, which is not enough for an agent turn.
 
 ## Verify
 

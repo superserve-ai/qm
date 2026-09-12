@@ -890,6 +890,7 @@ export function buildApp(
       ...(ss.egressAllow ? { egressAllow: ss.egressAllow } : {}),
       ...(ss.egressDeny ? { egressDeny: ss.egressDeny } : {}),
       ...(ss.defaultTimeoutSec ? { defaultTimeoutSec: ss.defaultTimeoutSec } : {}),
+      advisoryLock,
       extraTools: deploymentLayer.advertisedTools,
       credentialPaths: deploymentLayer.credentialPaths,
       layerToolFiles: () => deploymentLayer.installFiles,

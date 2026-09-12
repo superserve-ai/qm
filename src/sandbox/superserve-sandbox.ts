@@ -261,14 +261,17 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
   }
 
   function spooledScript(script: string, timeoutSec: number): string {
+    const cap = OUTPUT_CAP_BYTES;
+    const capture = (file: string): string => `{ head -c ${cap} >"${file}"; wc -c >"${file}.rest"; }`;
     return [
-      `o=$(mktemp) && e=$(mktemp) || exit 1`,
-      `timeout -k ${KILL_AFTER_SEC} ${timeoutSec} sh -c ${shq(script)} >"$o" 2>"$e"; rc=$?`,
-      `head -c ${OUTPUT_CAP_BYTES} "$o"`,
-      `head -c ${OUTPUT_CAP_BYTES} "$e" >&2`,
-      `if [ "$(wc -c <"$o")" -gt ${OUTPUT_CAP_BYTES} ] || [ "$(wc -c <"$e")" -gt ${OUTPUT_CAP_BYTES} ]; then echo ${shq(TRUNCATED_NOTICE)} >&2; fi`,
-      `rm -f "$o" "$e"`,
-      `exit $rc`,
+      `o=$(mktemp) && e=$(mktemp) && r=$(mktemp) || exit 1`,
+      `{ { timeout -k ${KILL_AFTER_SEC} ${timeoutSec} sh -c ${shq(script)}; echo $? >"$r"; } 2>&1 1>&3 3>&- | ${capture("$e")}; } 3>&1 | ${capture("$o")}`,
+      `cat "$o"`,
+      `cat "$e" >&2`,
+      `if [ "$(cat "$o.rest")" -gt 0 ] || [ "$(cat "$e.rest")" -gt 0 ]; then echo ${shq(TRUNCATED_NOTICE)} >&2; fi`,
+      `rc=$(cat "$r")`,
+      `rm -f "$o" "$e" "$r" "$o.rest" "$e.rest"`,
+      `exit "\${rc:-1}"`,
     ].join("; ");
   }
 

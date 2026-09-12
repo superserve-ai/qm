@@ -45,6 +45,19 @@ test("profile advertises resident disk, process sessions, and the template's too
   assert.ok(!sandbox.profile.spec?.notInstalled?.includes("gh"));
 });
 
+test("output is capped while the command runs, and the exit code survives", async () => {
+  const h = await sandbox.provision(layers);
+  const r = await sandbox.run(h, "head -c 3000000 /dev/zero | tr '\\0' a; echo err-side >&2; exit 7");
+  assert.equal(r.code, 7);
+  assert.equal(r.stdout.length, 2 * 1024 * 1024);
+  assert.match(r.stderr, /err-side/);
+  assert.match(r.stderr, /truncated/);
+  const small = await sandbox.run(h, "printf ok; printf bad >&2; exit 0");
+  assert.equal(small.stdout, "ok");
+  assert.equal(small.stderr, "bad");
+  assert.doesNotMatch(small.stderr, /truncated/);
+});
+
 test("commands are run under a timeout that force-kills a process ignoring SIGTERM", async () => {
   const h = await sandbox.provision(layers);
   await sandbox.run(h, "true");

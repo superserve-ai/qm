@@ -1,0 +1,338 @@
+#!/usr/bin/env node
+// Container entrypoint for a single-tenant QM stack: one process tree running migrations,
+// core, the combined web-ui (chat + admin), and portal (public front door + embedded
+// sign-in broker). Only portal binds the container port; core and web-ui stay on loopback.
+//
+// Lifecycle
+//   1. run src/migrate-main.ts to completion (non-zero exit aborts the container)
+//   2. start core on 127.0.0.1:QM_CORE_PORT and wait for /healthz
+//   3. start web-ui on 127.0.0.1:QM_WEB_UI_PORT and wait for /healthz
+//   4. start portal on PORT (all interfaces) and wait for /healthz
+// Any child exiting afterwards terminates the rest and exits non-zero within five seconds.
+// SIGTERM/SIGINT are forwarded to every child and core's SHUTDOWN_DRAIN_MS is honoured.
+//
+// This script never prints environment values. Only variable names and lifecycle events.
+import { spawn } from "node:child_process";
+import { dirname, join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const LOOPBACK_SHIM = pathToFileURL(join(ROOT, "scripts", "qm-tenant-loopback.mjs")).href;
+const env = process.env;
+
+const PUBLIC_PORT = intEnv("PORT", 8080);
+const CORE_PORT = intEnv("QM_CORE_PORT", 8081);
+const WEB_UI_PORT = intEnv("QM_WEB_UI_PORT", 8082);
+const BROKER_PORT = 8099; // fixed by plugins/portal when AUTH_EMBEDDED=1
+const READY_TIMEOUT_MS = intEnv("QM_READY_TIMEOUT_MS", 120_000);
+const DRAIN_MS = intEnv("SHUTDOWN_DRAIN_MS", 10_000);
+const FAILURE_GRACE_MS = 3_000;
+const DRAIN_BACKSTOP_MS = 5_000; // core's own hard-exit margin after SHUTDOWN_DRAIN_MS
+
+const CORE_URL = `http://127.0.0.1:${CORE_PORT}`;
+const WEB_UI_URL = `http://127.0.0.1:${WEB_UI_PORT}`;
+const PORTAL_URL = `http://127.0.0.1:${PUBLIC_PORT}`;
+
+const REQUIRED = ["ORG_ID", "PUBLIC_WEB_URL", "DATABASE_URL"];
+
+// Environment forwarded to the surface children (web-ui, portal). Core receives the whole
+// container environment; the surfaces only get what their code reads so that model keys,
+// database credentials and sandbox tokens never reach the public-facing process.
+const COMMON_PASSTHROUGH = [
+  "PATH",
+  "HOME",
+  "HOSTNAME",
+  "TZ",
+  "LANG",
+  "LC_ALL",
+  "TMPDIR",
+  "NODE_ENV",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "K_SERVICE",
+  "K_REVISION",
+  "K_CONFIGURATION",
+  "GIT_SHA",
+  "CORE_SIGNING_SECRET",
+  "PORTAL_IDENTITY_SECRET",
+  "DEPLOY_APPS_DOMAIN",
+  "BRANDING_DEBUG",
+];
+const WEB_UI_PASSTHROUGH = {
+  names: [...COMMON_PASSTHROUGH, "INBOX_USERS", "LOOPS_USERS", "STATE_FEED_RECONNECT_MS", "WEB_DELIVERY_POLL_MS"],
+  prefixes: ["WEB_UI_", "ADMIN_"],
+};
+const PORTAL_PASSTHROUGH = {
+  names: [...COMMON_PASSTHROUGH, "RESEND_API_KEY", "USER"],
+  prefixes: ["PORTAL_", "OIDC_", "AUTH_", "SMTP_"],
+};
+
+const children = new Map(); // name -> ChildProcess
+let shuttingDown = false;
+let exitCode = 0;
+let killTimer;
+
+function log(message) {
+  console.log(`[tenant] ${message}`);
+}
+
+function warn(message) {
+  console.error(`[tenant] ${message}`);
+}
+
+function intEnv(name, fallback) {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    warn(`${name} must be a non-negative integer`);
+    process.exit(2);
+  }
+  return value;
+}
+
+function isSet(name) {
+  return typeof env[name] === "string" && env[name].trim() !== "";
+}
+
+function pick(source, { names, prefixes }) {
+  const out = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (value === undefined) continue;
+    if (names.includes(key) || prefixes.some((prefix) => key.startsWith(prefix))) out[key] = value;
+  }
+  return out;
+}
+
+function withDefaults(target, defaults) {
+  for (const [key, value] of Object.entries(defaults)) {
+    if (target[key] === undefined || target[key].trim() === "") target[key] = value;
+  }
+  return target;
+}
+
+function loopbackOptions(base) {
+  const existing = base.NODE_OPTIONS?.trim();
+  return {
+    NODE_OPTIONS: `${existing ? `${existing} ` : ""}--import=${LOOPBACK_SHIM}`,
+    QM_LOOPBACK_ONLY: "1",
+  };
+}
+
+function authEmbedded() {
+  const explicit = env.AUTH_EMBEDDED?.trim();
+  if (explicit === "0") return false;
+  if (explicit === "1") return true;
+  return isSet("AUTH_SIGNING_JWK");
+}
+
+function publicBase() {
+  return env.PUBLIC_WEB_URL.trim().replace(/\/$/, "");
+}
+
+function coreEnv() {
+  const out = { ...env, PORT: String(CORE_PORT), ...loopbackOptions(env) };
+  const defaults = { WEB_UI_PUBLIC_URL: publicBase(), DATA_DIR: "/data" };
+  if (isSet("DATABASE_URL")) Object.assign(defaults, { SESSION_STORE: "postgres", RUN_STORE: "postgres" });
+  return withDefaults(out, defaults);
+}
+
+function webUiEnv() {
+  const out = pick(env, WEB_UI_PASSTHROUGH);
+  Object.assign(out, {
+    PORT: String(WEB_UI_PORT),
+    CORE_API_URL: CORE_URL,
+    CORE_ORG_ID: env.ORG_ID,
+    ADMIN_BASE_PATH: "/admin",
+    ...loopbackOptions(out),
+  });
+  return withDefaults(out, { WEB_UI_PUBLIC_URL: publicBase(), ADMIN_ENABLED: "1" });
+}
+
+function portalEnv() {
+  const base = publicBase();
+  const out = pick(env, PORTAL_PASSTHROUGH);
+  Object.assign(out, {
+    PORT: String(PUBLIC_PORT),
+    CORE_API_URL: CORE_URL,
+    CORE_ORG_ID: env.ORG_ID,
+    WEB_UI_UPSTREAM: WEB_UI_URL,
+  });
+  if (env.ADMIN_ENABLED?.trim() !== "0") out.ADMIN_UPSTREAM = `${WEB_UI_URL}/admin`;
+  const defaults = { PORTAL_PUBLIC_URL: base };
+  if (isSet("ORG_BRAND_SELF_LABEL")) defaults.AUTH_BRAND_NAME = env.ORG_BRAND_SELF_LABEL;
+  if (authEmbedded()) {
+    // Mirrors cli/src/services.ts brokerWiring("portal") for the embedded sign-in broker.
+    const issuer = `${base}/idp`;
+    const broker = `http://127.0.0.1:${BROKER_PORT}`;
+    Object.assign(defaults, {
+      AUTH_EMBEDDED: "1",
+      AUTH_BROKER_UPSTREAM: broker,
+      AUTH_BROKER_PREFIX: "/idp",
+      AUTH_ISSUER: issuer,
+      AUTH_CLIENT_ID: "qm-portal",
+      AUTH_REDIRECT_URI: `${base}/auth/callback`,
+      OIDC_CLIENT_ID: "qm-portal",
+      OIDC_ISSUER: issuer,
+      OIDC_AUTH_ENDPOINT: `${issuer}/authorize`,
+      OIDC_TOKEN_ENDPOINT: `${broker}/token`,
+      OIDC_USERINFO_ENDPOINT: `${broker}/userinfo`,
+      OIDC_JWKS_URI: `${broker}/.well-known/jwks.json`,
+      OIDC_SCOPES: "openid email",
+      OIDC_PRINCIPAL_CLAIM: "email",
+    });
+    if (isSet("AUTH_CLIENT_SECRET")) defaults.OIDC_CLIENT_SECRET = env.AUTH_CLIENT_SECRET;
+    if (isSet("AUTH_ALLOWED_EMAILS")) defaults.OIDC_ALLOWED_EMAILS = env.AUTH_ALLOWED_EMAILS;
+    if (isSet("AUTH_ALLOWED_EMAIL_DOMAIN")) defaults.OIDC_ALLOWED_EMAIL_DOMAIN = env.AUTH_ALLOWED_EMAIL_DOMAIN;
+  } else {
+    delete out.AUTH_EMBEDDED;
+  }
+  return withDefaults(out, defaults);
+}
+
+function spawnChild(name, cwd, entry, childEnv) {
+  const child = spawn(process.execPath, [join(cwd, entry)], { cwd, env: childEnv, stdio: "inherit" });
+  children.set(name, child);
+  log(`${name} started (pid ${child.pid})`);
+  child.on("error", (error) => {
+    children.delete(name);
+    fail(`${name} could not be spawned: ${error.message}`);
+  });
+  child.on("exit", (code, signal) => {
+    children.delete(name);
+    const how = signal ? `signal ${signal}` : `code ${code}`;
+    if (shuttingDown) {
+      log(`${name} exited (${how})`);
+      if (!signal && code !== 0) exitCode ||= 1;
+      if (children.size === 0) finish();
+      return;
+    }
+    fail(`${name} exited unexpectedly (${how})`);
+  });
+  return child;
+}
+
+function runToCompletion(name, cwd, entry, childEnv) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [join(cwd, entry)], { cwd, env: childEnv, stdio: "inherit" });
+    children.set(name, child);
+    log(`${name} started (pid ${child.pid})`);
+    child.on("error", (error) => {
+      children.delete(name);
+      warn(`${name} could not be spawned: ${error.message}`);
+      resolve(1);
+    });
+    child.on("exit", (code, signal) => {
+      children.delete(name);
+      log(`${name} finished (${signal ? `signal ${signal}` : `code ${code}`})`);
+      if (shuttingDown && children.size === 0) finish();
+      resolve(signal ? 1 : (code ?? 1));
+    });
+  });
+}
+
+async function waitHealthy(name, url) {
+  const deadline = Date.now() + READY_TIMEOUT_MS;
+  while (!shuttingDown) {
+    const ok = await fetch(url, { signal: AbortSignal.timeout(1_000) })
+      .then((response) => response.ok)
+      .catch(() => false);
+    if (ok) {
+      log(`${name} healthy`);
+      return true;
+    }
+    if (Date.now() > deadline) {
+      fail(`${name} did not report healthy within ${READY_TIMEOUT_MS}ms`);
+      return false;
+    }
+    await sleep(250);
+  }
+  return false;
+}
+
+function signalAll(signal) {
+  for (const [name, child] of children) {
+    try {
+      child.kill(signal);
+    } catch (error) {
+      warn(`${name}: ${signal} failed: ${error.message}`);
+    }
+  }
+}
+
+function terminate(code, graceMs) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  exitCode = code;
+  if (children.size === 0) return finish();
+  log(`stopping ${[...children.keys()].join(", ")} (grace ${graceMs}ms)`);
+  signalAll("SIGTERM");
+  killTimer = setTimeout(() => {
+    if (children.size === 0) return;
+    warn(`${[...children.keys()].join(", ")} still running after ${graceMs}ms; sending SIGKILL`);
+    signalAll("SIGKILL");
+    setTimeout(finish, 500).unref();
+  }, graceMs);
+  killTimer.unref();
+}
+
+function fail(message) {
+  warn(message);
+  terminate(1, FAILURE_GRACE_MS);
+}
+
+function finish() {
+  clearTimeout(killTimer);
+  log(`exiting with code ${exitCode}`);
+  process.exit(exitCode);
+}
+
+function shutdown(signal) {
+  log(`${signal} received; draining (SHUTDOWN_DRAIN_MS=${DRAIN_MS})`);
+  terminate(0, DRAIN_MS + DRAIN_BACKSTOP_MS + 1_000);
+}
+
+async function main() {
+  const missing = REQUIRED.filter((name) => !isSet(name));
+  if (missing.length) {
+    warn(`missing required environment: ${missing.join(", ")}`);
+    process.exit(2);
+  }
+  if (new Set([PUBLIC_PORT, CORE_PORT, WEB_UI_PORT, BROKER_PORT]).size !== 4) {
+    warn(`PORT, QM_CORE_PORT, QM_WEB_UI_PORT and the broker port ${BROKER_PORT} must all differ`);
+    process.exit(2);
+  }
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+
+  const core = coreEnv();
+  log(
+    `tenant ${env.ORG_ID}: portal :${PUBLIC_PORT} (public), core 127.0.0.1:${CORE_PORT}, ` +
+      `web-ui 127.0.0.1:${WEB_UI_PORT}, embedded auth ${authEmbedded() ? "on" : "off"}`,
+  );
+
+  const migrated = await runToCompletion("migrate", ROOT, "src/migrate-main.ts", core);
+  if (shuttingDown) return;
+  if (migrated !== 0) {
+    warn("migrations failed; refusing to start services");
+    exitCode = 1;
+    return finish();
+  }
+
+  spawnChild("core", ROOT, "src/index.ts", core);
+  if (!(await waitHealthy("core", `${CORE_URL}/healthz`))) return;
+
+  spawnChild("web-ui", join(ROOT, "plugins", "web-ui"), "server/index.ts", webUiEnv());
+  if (!(await waitHealthy("web-ui", `${WEB_UI_URL}/healthz`))) return;
+
+  spawnChild("portal", join(ROOT, "plugins", "portal"), "src/index.ts", portalEnv());
+  if (!(await waitHealthy("portal", `${PORTAL_URL}/healthz`))) return;
+
+  log(`ready: portal is serving ${publicBase()} on :${PUBLIC_PORT}`);
+}
+
+main().catch((error) => fail(`supervisor error: ${error instanceof Error ? error.message : String(error)}`));

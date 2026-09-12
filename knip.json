@@ -22,6 +22,8 @@
         "scripts/tape-parity-check.ts",
         "scripts/e2b-live-smoke.mjs",
         "scripts/modal-live-smoke.mjs",
+        "scripts/qm-tenant-entry.mjs",
+        "scripts/qm-tenant-loopback.mjs",
         "scripts/dev/cli.ts",
         "scripts/dev/supervisor/main.ts",
         "scripts/dev/test-helpers/fake-child.mjs",

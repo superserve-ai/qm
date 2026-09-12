@@ -1,7 +1,3 @@
-// Preloaded (via --import) into the core and web-ui children of the single-container
-// tenant supervisor. Neither service takes a bind address from its environment, so this
-// pins every listen() that names only a port to the loopback interface. Portal is never
-// loaded with this shim: it must answer on the container port.
 import net from "node:net";
 
 if (process.env.QM_LOOPBACK_ONLY === "1") {

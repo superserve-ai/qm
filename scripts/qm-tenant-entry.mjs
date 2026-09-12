@@ -1,17 +1,4 @@
 #!/usr/bin/env node
-// Container entrypoint for a single-tenant QM stack: one process tree running migrations,
-// core, the combined web-ui (chat + admin), and portal (public front door + embedded
-// sign-in broker). Only portal binds the container port; core and web-ui stay on loopback.
-//
-// Lifecycle
-//   1. run src/migrate-main.ts to completion (non-zero exit aborts the container)
-//   2. start core on 127.0.0.1:QM_CORE_PORT and wait for /healthz
-//   3. start web-ui on 127.0.0.1:QM_WEB_UI_PORT and wait for /healthz
-//   4. start portal on PORT (all interfaces) and wait for /healthz
-// Any child exiting afterwards terminates the rest and exits non-zero within five seconds.
-// SIGTERM/SIGINT are forwarded to every child and core's SHUTDOWN_DRAIN_MS is honoured.
-//
-// This script never prints environment values. Only variable names and lifecycle events.
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -24,11 +11,11 @@ const env = process.env;
 const PUBLIC_PORT = intEnv("PORT", 8080);
 const CORE_PORT = intEnv("QM_CORE_PORT", 8081);
 const WEB_UI_PORT = intEnv("QM_WEB_UI_PORT", 8082);
-const BROKER_PORT = 8099; // fixed by plugins/portal when AUTH_EMBEDDED=1
+const BROKER_PORT = 8099;
 const READY_TIMEOUT_MS = intEnv("QM_READY_TIMEOUT_MS", 120_000);
 const DRAIN_MS = intEnv("SHUTDOWN_DRAIN_MS", 10_000);
 const FAILURE_GRACE_MS = 3_000;
-const DRAIN_BACKSTOP_MS = 5_000; // core's own hard-exit margin after SHUTDOWN_DRAIN_MS
+const DRAIN_BACKSTOP_MS = 5_000;
 
 const CORE_URL = `http://127.0.0.1:${CORE_PORT}`;
 const WEB_UI_URL = `http://127.0.0.1:${WEB_UI_PORT}`;
@@ -36,9 +23,6 @@ const PORTAL_URL = `http://127.0.0.1:${PUBLIC_PORT}`;
 
 const REQUIRED = ["ORG_ID", "PUBLIC_WEB_URL", "DATABASE_URL"];
 
-// Environment forwarded to the surface children (web-ui, portal). Core receives the whole
-// container environment; the surfaces only get what their code reads so that model keys,
-// database credentials and sandbox tokens never reach the public-facing process.
 const COMMON_PASSTHROUGH = [
   "PATH",
   "HOME",
@@ -71,7 +55,7 @@ const PORTAL_PASSTHROUGH = {
   prefixes: ["PORTAL_", "OIDC_", "AUTH_", "SMTP_"],
 };
 
-const children = new Map(); // name -> ChildProcess
+const children = new Map();
 let shuttingDown = false;
 let exitCode = 0;
 let killTimer;
@@ -166,7 +150,6 @@ function portalEnv() {
   const defaults = { PORTAL_PUBLIC_URL: base };
   if (isSet("ORG_BRAND_SELF_LABEL")) defaults.AUTH_BRAND_NAME = env.ORG_BRAND_SELF_LABEL;
   if (authEmbedded()) {
-    // Mirrors cli/src/services.ts brokerWiring("portal") for the embedded sign-in broker.
     const issuer = `${base}/idp`;
     const broker = `http://127.0.0.1:${BROKER_PORT}`;
     Object.assign(defaults, {

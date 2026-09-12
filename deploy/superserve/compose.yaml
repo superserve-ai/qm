@@ -1,5 +1,3 @@
-# Local backing services for the single-container tenant image: Postgres 16 and MinIO.
-# Nothing here is for production. Start with: docker compose -f deploy/superserve/compose.yaml up -d
 name: qm-superserve
 
 services:
@@ -25,8 +23,6 @@ services:
     environment:
       MINIO_ROOT_USER: qm-local
       MINIO_ROOT_PASSWORD: qm-local-secret
-      # The AWS SDK addresses buckets virtual-host style (<bucket>.<endpoint host>). MINIO_DOMAIN
-      # plus the bucket alias below make "qm-tenant.minio" resolve to this container on the compose network.
       MINIO_DOMAIN: minio
     ports:
       - "127.0.0.1:59000:9000"

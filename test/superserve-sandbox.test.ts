@@ -87,9 +87,11 @@ test("adopting an existing sandbox applies the configured egress policy before a
   const id = fake.current(scopeName())!.id;
   assert.ok(calls.indexOf(`update:${id}`) < calls.lastIndexOf(`connect:${id}`), "policy applied before activation");
 
-  const relaxed = make();
+  const relaxed = make({ idlePauseSec: 120, retentionSec: 3600 });
   await relaxed.provision(layers);
   assert.deepEqual(fake.current(scopeName())?.network, { allowOut: [], denyOut: [] });
+  assert.equal(fake.current(scopeName())?.timeoutSeconds, 120);
+  assert.equal(fake.current(scopeName())?.autoDeleteSeconds, 3600);
 });
 
 test("computerStatus observing a deleted sandbox clears cached state so the next provision replaces it", async () => {

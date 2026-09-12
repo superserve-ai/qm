@@ -136,7 +136,12 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
   }
 
   const adoptedNetwork: SuperserveNetwork = network ?? { allowOut: [], denyOut: [] };
-  const reconcileNetwork = (sandboxId: string): Promise<void> => client.update(sandboxId, { network: adoptedNetwork });
+  const reconcileLifecycle = (sandboxId: string): Promise<void> =>
+    client.update(sandboxId, {
+      network: adoptedNetwork,
+      timeoutSeconds: idlePauseSec,
+      autoDeleteSeconds: retentionSec,
+    });
 
   async function adopt(name: string, session: SuperserveSession, knownHome?: string): Promise<Live> {
     const homeDir = knownHome ?? (await detectHome(session));
@@ -158,7 +163,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         const stored = await store.get(scope);
         if (stored) {
           try {
-            await reconcileNetwork(stored.sandboxId);
+            await reconcileLifecycle(stored.sandboxId);
             const session = await client.connect(stored.sandboxId);
             const live = await adopt(name, session, stored.homeDir);
             await store.merge(scope, { lifecycle: "running", preservationError: undefined, homeDir: live.homeDir });
@@ -172,7 +177,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         const listed = await client.list({ [SUPERSERVE_METADATA.scope]: name });
         for (const summary of listed) {
           try {
-            await reconcileNetwork(summary.id);
+            await reconcileLifecycle(summary.id);
             const session = await client.connect(summary.id);
             const live = await adopt(name, session);
             await store.put(scope, {
@@ -504,19 +509,6 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
           guestResponsive: false,
         };
       }
-    },
-
-    async restartComputer(scopeId: string): Promise<void> {
-      const name = sandboxScopeName(prefix, scopeId);
-      await provisionQueue(scopeId, async () => {
-        const live = liveByName.get(name);
-        liveByName.delete(name);
-        if (live) {
-          await live.session.pause().catch(swallowAs("superserve-sandbox: pause before restart", undefined));
-        }
-      });
-      scopeByName.set(name, scopeId);
-      await ensureLive(scopeId, name);
     },
 
     async teardown(handle, tdOpts?: TeardownOptions): Promise<void> {

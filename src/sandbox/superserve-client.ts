@@ -160,10 +160,13 @@ export function createSdkSuperserveClient(opts: SdkSuperserveClientOptions): Sup
         return await sbx.files.read(absPath);
       } catch (err) {
         if (isFileMissing(err)) {
-          const status = await sbx.getInfo().then(
-            (i) => i.status,
-            () => "deleted",
-          );
+          let status: string;
+          try {
+            status = (await sbx.getInfo()).status;
+          } catch (infoErr) {
+            if (isGoneError(infoErr)) gone(sbx.id, infoErr);
+            throw infoErr;
+          }
           if (GONE_STATES.has(status)) gone(sbx.id, err);
           return null;
         }

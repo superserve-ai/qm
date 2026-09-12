@@ -31,7 +31,9 @@
         "scripts/migrate-principals-to-email.mjs",
         "scripts/mine-slack-scenarios.ts",
         "scripts/skills-materialize-smoke.ts",
-        "scripts/slack-user-token.ts"
+        "scripts/slack-user-token.ts",
+        "superserve/templates/qm-agent.ts",
+        "superserve/templates/verify-qm-agent.ts"
       ]
     },
     "cli": {

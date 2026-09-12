@@ -56,6 +56,7 @@ const PORTAL_PASSTHROUGH = {
 };
 
 const children = new Map();
+let stagedDrain = false;
 let shuttingDown = false;
 let exitCode = 0;
 let killTimer;
@@ -191,6 +192,11 @@ function spawnChild(name, cwd, entry, childEnv) {
     if (shuttingDown) {
       log(`${name} exited (${how})`);
       if (!signal && code !== 0) exitCode ||= 1;
+      if (stagedDrain && name === "core") {
+        stagedDrain = false;
+        log("core drained; stopping the public surfaces");
+        signalAll("SIGTERM");
+      }
       if (children.size === 0) finish();
       return;
     }
@@ -247,13 +253,18 @@ function signalAll(signal) {
   }
 }
 
-function terminate(code, graceMs) {
+function terminate(code, graceMs, staged = false) {
   if (shuttingDown) return;
   shuttingDown = true;
   exitCode = code;
   if (children.size === 0) return finish();
   log(`stopping ${[...children.keys()].join(", ")} (grace ${graceMs}ms)`);
-  signalAll("SIGTERM");
+  stagedDrain = staged && children.has("core");
+  if (stagedDrain) {
+    children.get("core").kill("SIGTERM");
+  } else {
+    signalAll("SIGTERM");
+  }
   killTimer = setTimeout(() => {
     if (children.size === 0) return;
     warn(`${[...children.keys()].join(", ")} still running after ${graceMs}ms; sending SIGKILL`);
@@ -276,7 +287,7 @@ function finish() {
 
 function shutdown(signal) {
   log(`${signal} received; draining (SHUTDOWN_DRAIN_MS=${DRAIN_MS})`);
-  terminate(0, DRAIN_MS + DRAIN_BACKSTOP_MS + 1_000);
+  terminate(0, DRAIN_MS + DRAIN_BACKSTOP_MS + 1_000, true);
 }
 
 async function main() {

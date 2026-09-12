@@ -22,7 +22,7 @@ container port (PORT, default 8080)
 Failure and shutdown:
 
 - If any child exits, the supervisor sends `SIGTERM` to the rest, `SIGKILL`s stragglers after 3 s, and exits `1`. Cloud Run restarts the container.
-- `SIGTERM`/`SIGINT` are forwarded to every child. Core drains in-flight runs for `SHUTDOWN_DRAIN_MS` (image default `4000`) plus its own 5 s backstop; the supervisor waits that long plus 1 s before `SIGKILL`, then exits `0`. Keep `SHUTDOWN_DRAIN_MS` at least 6 s under the service's termination grace period (Cloud Run defaults to 10 s).
+- On `SIGTERM`/`SIGINT` the supervisor signals core first and keeps portal and web-ui serving until core has exited, so in-flight public requests are not reset while runs drain. Core drains for `SHUTDOWN_DRAIN_MS` (image default `4000`) plus its own 5 s backstop; the supervisor waits that long plus 1 s before `SIGKILL`, then exits `0`. Keep `SHUTDOWN_DRAIN_MS` at least 6 s under the service's termination grace period (Cloud Run defaults to 10 s).
 - The supervisor logs child lifecycle events only, prefixed `[tenant]`. It never prints environment values.
 
 Core and web-ui do not read a bind address from their environment (`server.listen(PORT)` in `src/index.ts` and `plugins/web-ui/server/index.ts`), so the supervisor preloads `scripts/qm-tenant-loopback.mjs` into those two children. It rewrites any `listen(port)` without an explicit host to `127.0.0.1`. Portal is started without the shim.

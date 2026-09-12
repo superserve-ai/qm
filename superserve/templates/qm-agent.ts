@@ -1,13 +1,4 @@
 #!/usr/bin/env node
-// Builds the `qm-agent-<release>` Superserve template: the pre-baked VM image that
-// QM scope sandboxes boot from when SANDBOX_BACKEND=superserve. Mirrors the tool
-// inventory of fly/Dockerfile (the shared sandbox base image), adapted to a
-// Superserve BuildSpec on ubuntu:24.04.
-//
-//   SUPERSERVE_API_KEY=... node superserve/templates/qm-agent.ts --release 0.1.0 --wait
-//
-// Per-deployment tools and skills are materialized by the backend at provision
-// time and deliberately do NOT live here.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
@@ -21,7 +12,6 @@ import {
   templateNameForRelease,
 } from "./common.ts";
 
-// Pinned to the same versions as fly/Dockerfile. Superserve build VMs are linux/amd64 only.
 const CLAUDE_CODE_VERSION = "2.1.210";
 const CODEX_VERSION = "0.144.4";
 const GH_VERSION = "2.93.0";
@@ -37,7 +27,6 @@ const DEFAULT_MEMORY_MIB = 2048;
 const DEFAULT_DISK_MIB = 8192;
 
 const APT_PACKAGES = [
-  // fly/Dockerfile essentials (nftables omitted: egress is not enforced in-VM on Superserve).
   "bash",
   "coreutils",
   "findutils",
@@ -76,7 +65,6 @@ function buildSteps(): BuildStep[] {
       ]),
     },
     {
-      // Node 24 via NodeSource (fly/Dockerfile copies it from node:24-slim instead).
       run: sh([
         `curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash -`,
         "apt-get install -y --no-install-recommends nodejs",
@@ -123,9 +111,6 @@ function buildSteps(): BuildStep[] {
       ]),
     },
     {
-      // The exec daemon sets its own PATH at runtime (a template `env PATH` step is not
-      // honored there), and a symlink would resolve to the system prefix. Wrappers in
-      // /usr/local/bin put the venv interpreters first, like the Dockerfile's PATH does.
       run: sh([
         "for t in python python3 pip pip3; do",
         `  printf '#!/bin/sh\\nexec ${AGENT_VENV}/bin/%s "$@"\\n' "$t" > "/usr/local/bin/$t"`,
@@ -145,7 +130,6 @@ function buildSteps(): BuildStep[] {
         "chmod +x /usr/local/bin/x-api",
       ]),
     },
-    // The backend discovers $HOME at runtime and works under $HOME/workspace.
     { workdir: "/root/workspace" },
   ];
 }

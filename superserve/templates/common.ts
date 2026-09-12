@@ -13,7 +13,6 @@ export interface Connection {
   baseUrl?: string;
 }
 
-/** Resolve API credentials from flags + env. `SUPERSERVE_API_KEY` is required. */
 export function resolveConnection(baseUrlFlag?: string): Connection {
   const apiKey = process.env.SUPERSERVE_API_KEY?.trim();
   if (!apiKey) throw new Error("SUPERSERVE_API_KEY is required");
@@ -21,7 +20,6 @@ export function resolveConnection(baseUrlFlag?: string): Connection {
   return baseUrl ? { apiKey, baseUrl } : { apiKey };
 }
 
-/** The QM release a template is built for; defaults to the root package.json version. */
 export function defaultRelease(): string {
   const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { version?: string };
   if (!pkg.version) throw new Error("package.json has no version");
@@ -40,10 +38,6 @@ export function fmtMs(ms: number): string {
   return ms < 10_000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
 
-/**
- * Look a template up by exact name. `Template.connect` only accepts UUIDs on some
- * API versions, so resolve through the list endpoint and match the name exactly.
- */
 export async function findTemplateByName(name: string, conn: Connection): Promise<TemplateInfo | undefined> {
   const matches = await Template.list({ ...conn, namePrefix: name });
   return matches.find((t) => t.name === name);

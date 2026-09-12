@@ -1,14 +1,8 @@
 #!/usr/bin/env node
-// Boots a sandbox from the `qm-agent-<release>` template, checks that every tool
-// the QM harnesses expect is present, prints the login environment, and measures
-// cold boot to first exec. Exits non-zero if any expected tool is missing.
-//
-//   SUPERSERVE_API_KEY=... node superserve/templates/verify-qm-agent.ts [--release 0.1.0] [--keep]
 import { parseArgs } from "node:util";
 import { Sandbox } from "@superserve/sdk";
 import { defaultRelease, findTemplateByName, fmtMs, resolveConnection, templateNameForRelease } from "./common.ts";
 
-// Everything the Superserve backend's default tool list needs, plus what fly/Dockerfile bakes in.
 const EXPECTED_TOOLS = [
   "sh",
   "bash",
@@ -80,7 +74,6 @@ function parseCli(argv: string[]): Args {
   };
 }
 
-// Mirrors how the backend executes: `timeout N sh -c '<script>'`.
 async function run(sandbox: Sandbox, script: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const r = await sandbox.commands.run(`timeout 120 sh -c ${shq(script)}`, { timeoutMs: 150_000 });
   return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr };

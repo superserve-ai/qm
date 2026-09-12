@@ -38,6 +38,7 @@ export interface FakeSuperserve {
   expire(name: string): void;
   execScripts(): string[];
   calls(): string[];
+  failNextList(error: Error): void;
   cleanup(): void;
 }
 
@@ -48,6 +49,7 @@ export function installFakeSuperserve(): FakeSuperserve {
   const calls: string[] = [];
   let nextId = 1;
   let clock = 0;
+  let listFailure: Error | null = null;
 
   const byName = (name: string): FakeRecord | undefined => {
     const all = [...records.values()].filter((r) => r.name === name).sort((a, b) => b.createdAt - a.createdAt);
@@ -168,6 +170,11 @@ export function installFakeSuperserve(): FakeSuperserve {
       return info(r);
     },
     async list(metadata): Promise<SuperserveSandboxInfo[]> {
+      if (listFailure) {
+        const error = listFailure;
+        listFailure = null;
+        throw error;
+      }
       return [...records.values()]
         .filter((r) => !r.expired && Object.entries(metadata).every(([k, v]) => r.metadata[k] === v))
         .map(info);
@@ -208,6 +215,9 @@ export function installFakeSuperserve(): FakeSuperserve {
     },
     execScripts: () => [...execScripts],
     calls: () => [...calls],
+    failNextList: (error) => {
+      listFailure = error;
+    },
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }

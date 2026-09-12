@@ -241,7 +241,11 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     } catch (err) {
       if (!(err instanceof SuperserveSandboxGoneError)) throw err;
       liveByName.delete(name);
-      return action(await acquire());
+      const scope = scopeByName.get(name);
+      if (scope !== undefined) await store.delete(scope);
+      throw new Error(`superserve sandbox for ${name} is gone; the next provision creates a replacement`, {
+        cause: err,
+      });
     }
   }
 
@@ -322,7 +326,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     const stored = await store.get(scope);
     const cached = liveByName.get(name);
     const ids = new Set([stored?.sandboxId, cached?.session.id].filter((id): id is string => !!id));
-    const listed = await client.list({ [SUPERSERVE_METADATA.scope]: name }).catch(swallowAs("superserve: list", []));
+    const listed = await client.list({ [SUPERSERVE_METADATA.scope]: name });
     for (const summary of listed) ids.add(summary.id);
     for (const id of ids) {
       try {

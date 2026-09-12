@@ -191,12 +191,31 @@ test("a sandbox that disappeared is replaced on the next provision", async () =>
   assert.notEqual((await store.get(scope))?.sandboxId, undefined);
 });
 
-test("a sandbox lost mid-session is recreated transparently for the next command", async () => {
+test("a sandbox lost mid-session fails the command and is replaced by the next provision", async () => {
+  const store: DurableMap<StoredSuperserveSandbox> = createMemoryMap();
+  sandbox = make({ store });
   const h = await sandbox.provision(layers);
   fake.expire(scopeName());
-  const r = await sandbox.run(h, "echo back");
-  assert.equal(r.stdout.trim(), "back");
+  await assert.rejects(sandbox.run(h, "echo back"), /is gone/);
+  assert.equal(fake.createdCount(scopeName()), 1);
+  assert.equal(await store.get(scope), null);
+
+  const again = await sandbox.provision(layers);
+  assert.equal(again.coldStart, true);
   assert.equal(fake.createdCount(scopeName()), 2);
+  assert.equal((await sandbox.run(again, "echo back")).stdout.trim(), "back");
+});
+
+test("destroyScope surfaces a failed listing instead of forgetting the scope", async () => {
+  const store: DurableMap<StoredSuperserveSandbox> = createMemoryMap();
+  sandbox = make({ store });
+  await sandbox.provision(layers);
+  fake.failNextList(new Error("superserve unavailable"));
+  await assert.rejects(sandbox.destroyScope!(scope), /unavailable/);
+  assert.ok(await store.get(scope), "record survives so retirement can be retried");
+  assert.ok(fake.current(scopeName()), "sandbox untouched");
+  await sandbox.destroyScope!(scope);
+  assert.equal(fake.current(scopeName()), null);
 });
 
 test("destroy teardown and destroyScope kill the sandbox and forget the scope", async () => {

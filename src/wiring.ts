@@ -876,6 +876,8 @@ export function buildApp(
   const buildSuperserve = (): Sandbox => {
     const ss = config.superserveSandbox;
     if (!ss.apiKey) throw new Error("SANDBOX_BACKEND=superserve requires SUPERSERVE_API_KEY");
+    if (!ss.template)
+      throw new Error("SANDBOX_BACKEND=superserve requires SUPERSERVE_TEMPLATE (a ready qm-agent-<release> template)");
     return createSuperserveSandbox(workspace, {
       client: createSdkSuperserveClient({
         apiKey: ss.apiKey,
@@ -883,7 +885,7 @@ export function buildApp(
         ...(ss.template ? { template: ss.template } : {}),
       }),
       ...(ss.namePrefix ? { namePrefix: ss.namePrefix } : {}),
-      ...(ss.template ? { template: ss.template } : {}),
+      template: ss.template,
       ...(ss.homeDir ? { homeDir: ss.homeDir } : {}),
       ...(ss.idlePauseSec !== undefined ? { idlePauseSec: ss.idlePauseSec } : {}),
       ...(ss.retentionSec !== undefined ? { retentionSec: ss.retentionSec } : {}),
@@ -954,11 +956,21 @@ export function buildApp(
     rollout: artifactMap<SandboxResourceRollout>("sandbox_resource_rollout"),
     legacyScopes: async () => (await sessions.distinctScopes()).map((scope) => scope.scopeId),
     legacySandboxes: async () => {
-      const [e2b, modal, aws] = await Promise.all([e2bBodies.entries(), modalBodies.entries(), awsBodies.entries()]);
+      const [e2b, modal, aws, superserve] = await Promise.all([
+        e2bBodies.entries(),
+        modalBodies.entries(),
+        awsBodies.entries(),
+        superserveBodies.entries(),
+      ]);
       return [
         ...e2b.map(([scopeId, body]) => ({ scopeId, backend: "e2b" as const, machineId: body.sandboxId })),
         ...modal.map(([scopeId, body]) => ({ scopeId, backend: "modal" as const, machineId: body.sandboxId })),
         ...aws.map(([scopeId, body]) => ({ scopeId, backend: "aws" as const, machineId: body.microvmId })),
+        ...superserve.map(([scopeId, body]) => ({
+          scopeId,
+          backend: "superserve" as const,
+          machineId: body.sandboxId,
+        })),
       ];
     },
     records: artifactMap<SandboxResource>("sandbox_resources"),

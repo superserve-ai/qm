@@ -157,6 +157,11 @@ export function installFakeSuperserve(): FakeSuperserve {
       records.set(id, r);
       return session(r);
     },
+    async update(sandboxId, patch): Promise<void> {
+      const r = records.get(sandboxId);
+      if (!r || r.expired) throw new SuperserveSandboxGoneError(sandboxId, "sandbox was not found");
+      await session(r).update(patch);
+    },
     async connect(sandboxId): Promise<SuperserveSession> {
       calls.push(`connect:${sandboxId}`);
       const r = records.get(sandboxId);

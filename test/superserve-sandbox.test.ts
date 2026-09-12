@@ -74,7 +74,7 @@ test("egress allow/deny lists are applied at create time", async () => {
   });
 });
 
-test("adopting an existing sandbox reapplies the configured egress policy", async () => {
+test("adopting an existing sandbox applies the configured egress policy before activating it", async () => {
   sandbox = make();
   await sandbox.provision(layers);
   assert.equal(fake.current(scopeName())?.network, undefined);
@@ -83,7 +83,26 @@ test("adopting an existing sandbox reapplies the configured egress policy", asyn
   await tightened.provision(layers);
   assert.equal(fake.createdCount(scopeName()), 1);
   assert.deepEqual(fake.current(scopeName())?.network, { allowOut: ["api.anthropic.com"], denyOut: ["0.0.0.0/0"] });
-  assert.ok(fake.calls().some((c) => c.startsWith("update:")));
+  const calls = fake.calls();
+  const id = fake.current(scopeName())!.id;
+  assert.ok(calls.indexOf(`update:${id}`) < calls.lastIndexOf(`connect:${id}`), "policy applied before activation");
+
+  const relaxed = make();
+  await relaxed.provision(layers);
+  assert.deepEqual(fake.current(scopeName())?.network, { allowOut: [], denyOut: [] });
+});
+
+test("computerStatus observing a deleted sandbox clears cached state so the next provision replaces it", async () => {
+  const store: DurableMap<StoredSuperserveSandbox> = createMemoryMap();
+  sandbox = make({ store });
+  await sandbox.provision(layers);
+  fake.expire(scopeName());
+  const status = await sandbox.computerStatus!(scope);
+  assert.equal(status.provisioned, false);
+  assert.equal(await store.get(scope), null);
+  const again = await sandbox.provision(layers);
+  assert.equal(again.coldStart, true);
+  assert.equal(fake.createdCount(scopeName()), 2);
 });
 
 test("template and prefix flow through to creation", async () => {

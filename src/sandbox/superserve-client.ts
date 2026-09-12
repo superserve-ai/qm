@@ -67,6 +67,7 @@ export class SuperserveSandboxGoneError extends Error {
 export interface SuperserveClient {
   create(opts: SuperserveCreateOptions): Promise<SuperserveSession>;
   connect(sandboxId: string): Promise<SuperserveSession>;
+  update(sandboxId: string, patch: SuperserveUpdate): Promise<void>;
   info(sandboxId: string): Promise<SuperserveSandboxInfo>;
   list(metadata: Record<string, string>): Promise<SuperserveSandboxSummary[]>;
   kill(sandboxId: string): Promise<void>;
@@ -234,6 +235,15 @@ export function createSdkSuperserveClient(opts: SdkSuperserveClientOptions): Sup
         previewAccess: "private",
       });
       return wrap(sbx);
+    },
+    async update(sandboxId, patch): Promise<void> {
+      const { Sandbox } = await loadSdk();
+      try {
+        await Sandbox.updateById(sandboxId, patch, connection);
+      } catch (err) {
+        if (isGoneError(err)) gone(sandboxId, err);
+        throw err;
+      }
     },
     async connect(sandboxId): Promise<SuperserveSession> {
       const { Sandbox } = await loadSdk();

@@ -135,9 +135,8 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     return home.startsWith("/") ? home : configuredHome;
   }
 
-  async function reconcileNetwork(session: SuperserveSession): Promise<void> {
-    if (network) await session.update({ network });
-  }
+  const adoptedNetwork: SuperserveNetwork = network ?? { allowOut: [], denyOut: [] };
+  const reconcileNetwork = (sandboxId: string): Promise<void> => client.update(sandboxId, { network: adoptedNetwork });
 
   async function adopt(name: string, session: SuperserveSession, knownHome?: string): Promise<Live> {
     const homeDir = knownHome ?? (await detectHome(session));
@@ -159,8 +158,8 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         const stored = await store.get(scope);
         if (stored) {
           try {
+            await reconcileNetwork(stored.sandboxId);
             const session = await client.connect(stored.sandboxId);
-            await reconcileNetwork(session);
             const live = await adopt(name, session, stored.homeDir);
             await store.merge(scope, { lifecycle: "running", preservationError: undefined, homeDir: live.homeDir });
             return { live, coldStart: false };
@@ -173,8 +172,8 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         const listed = await client.list({ [SUPERSERVE_METADATA.scope]: name });
         for (const summary of listed) {
           try {
+            await reconcileNetwork(summary.id);
             const session = await client.connect(summary.id);
-            await reconcileNetwork(session);
             const live = await adopt(name, session);
             await store.put(scope, {
               sandboxId: session.id,
@@ -493,10 +492,15 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
           guestResponsive: r.exitCode === 0 && /responsive/.test(r.stdout),
         };
       } catch (e) {
+        const gone = e instanceof SuperserveSandboxGoneError;
+        if (gone) {
+          liveByName.delete(name);
+          await store.delete(scopeId);
+        }
         return {
           recovery,
           machine: `${machine} (${errMessage(e).slice(0, 120)})`,
-          provisioned: !(e instanceof SuperserveSandboxGoneError),
+          provisioned: !gone,
           guestResponsive: false,
         };
       }

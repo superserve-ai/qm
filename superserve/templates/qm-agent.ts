@@ -5,7 +5,7 @@ import { parseArgs } from "node:util";
 import { BuildError, Template, type BuildStep, type TemplateInfo } from "@superserve/sdk";
 import {
   REPO_ROOT,
-  defaultRelease,
+  requireRelease,
   findTemplateByName,
   fmtMs,
   resolveConnection,
@@ -161,7 +161,7 @@ function parseCli(argv: string[]): Args {
   if (values.help) {
     console.log(
       [
-        "usage: node superserve/templates/qm-agent.ts [--release <qm-release>] [--wait] [--force]",
+        "usage: node superserve/templates/qm-agent.ts --release <qm-release> [--wait] [--force]",
         "         [--base-url <url>] [--vcpu N] [--memory-mib N] [--disk-mib N]",
         "env:   SUPERSERVE_API_KEY (required), SUPERSERVE_BASE_URL (optional)",
       ].join("\n"),
@@ -175,7 +175,7 @@ function parseCli(argv: string[]): Args {
     return n;
   };
   return {
-    release: values.release ?? defaultRelease(),
+    release: requireRelease(values.release),
     wait: values.wait,
     force: values.force,
     ...(values["base-url"] ? { baseUrl: values["base-url"] } : {}),

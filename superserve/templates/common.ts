@@ -1,10 +1,8 @@
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Template, type TemplateInfo } from "@superserve/sdk";
 
 export const HERE = dirname(fileURLToPath(import.meta.url));
-export const REPO_ROOT = join(HERE, "..", "..");
 
 export const TEMPLATE_NAME_PREFIX = "qm-agent";
 
@@ -20,10 +18,14 @@ export function resolveConnection(baseUrlFlag?: string): Connection {
   return baseUrl ? { apiKey, baseUrl } : { apiKey };
 }
 
-export function defaultRelease(): string {
-  const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as { version?: string };
-  if (!pkg.version) throw new Error("package.json has no version");
-  return pkg.version;
+export function requireRelease(value?: string): string {
+  const release = value?.trim();
+  if (!release) {
+    throw new Error(
+      "--release <qm-release> is required: the QM release tag the deployment runs, naming the template qm-agent-<release>",
+    );
+  }
+  return release;
 }
 
 export function templateNameForRelease(release: string): string {

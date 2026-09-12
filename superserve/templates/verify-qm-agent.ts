@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
 import { Sandbox } from "@superserve/sdk";
-import { defaultRelease, findTemplateByName, fmtMs, resolveConnection, templateNameForRelease } from "./common.ts";
+import { requireRelease, findTemplateByName, fmtMs, resolveConnection, templateNameForRelease } from "./common.ts";
 
 const EXPECTED_TOOLS = [
   "sh",
@@ -68,7 +68,7 @@ function parseCli(argv: string[]): Args {
     process.exit(0);
   }
   return {
-    template: values.template ?? templateNameForRelease(values.release ?? defaultRelease()),
+    template: values.template ?? templateNameForRelease(requireRelease(values.release)),
     keep: values.keep,
     ...(values["base-url"] ? { baseUrl: values["base-url"] } : {}),
   };

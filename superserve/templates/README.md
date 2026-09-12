@@ -44,8 +44,8 @@ export SUPERSERVE_API_KEY=ss_live_...
 node superserve/templates/qm-agent.ts --release 0.1.0 --wait
 ```
 
-- `--release` defaults to the `version` in the root `package.json`; the template is named
-  `qm-agent-<release>`.
+- `--release` is required and must be the QM release tag the deployment runs (the root
+  `package.json` version does not track releases); the template is named `qm-agent-<release>`.
 - `--wait` streams build logs and blocks until the build is ready (or fails with a
   `BuildError` code such as `step_failed`). Without it the build is queued and the script
   returns immediately.

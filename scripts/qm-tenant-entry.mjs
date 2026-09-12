@@ -296,6 +296,12 @@ async function main() {
     warn(`missing required environment: ${missing.join(", ")}`);
     process.exit(2);
   }
+  if (env.SLACK_EVENTS_MODE === "http") {
+    warn(
+      "SLACK_EVENTS_MODE=http is not supported by this image: only portal is public and it does not forward /slack/events; use Slack socket mode",
+    );
+    process.exit(2);
+  }
   if (new Set([PUBLIC_PORT, CORE_PORT, WEB_UI_PORT, BROKER_PORT]).size !== 4) {
     warn(`PORT, QM_CORE_PORT, QM_WEB_UI_PORT and the broker port ${BROKER_PORT} must all differ`);
     process.exit(2);

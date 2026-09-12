@@ -1,10 +1,11 @@
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Template, type TemplateInfo } from "@superserve/sdk";
 
-export const HERE = dirname(fileURLToPath(import.meta.url));
+const HERE = dirname(fileURLToPath(import.meta.url));
+export const REPO_ROOT = join(HERE, "..", "..");
 
-export const TEMPLATE_NAME_PREFIX = "qm-agent";
+const TEMPLATE_NAME_PREFIX = "qm-agent";
 
 export interface Connection {
   apiKey: string;

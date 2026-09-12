@@ -80,6 +80,7 @@ export interface SdkSuperserveClientOptions {
 }
 
 const DEFAULT_MAX_COMMAND_MS = 3600_000;
+const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const GONE_STATES: ReadonlySet<string> = new Set(["deleted", "failed"]);
 
 function isGoneError(err: unknown): boolean {
@@ -119,25 +120,34 @@ export function createSdkSuperserveClient(opts: SdkSuperserveClientOptions): Sup
     id: sbx.id,
     async run(command, runOpts): Promise<SuperserveCommandResult> {
       const timeoutMs = runOpts?.timeoutMs ?? maxCommandMs;
+      const cap = runOpts?.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
       let stdout = "";
       let stderr = "";
+      let truncated = false;
+      const take = (current: string, chunk: string): string => {
+        const room = cap - current.length;
+        if (room <= 0) {
+          truncated = true;
+          return current;
+        }
+        if (chunk.length > room) truncated = true;
+        return current + chunk.slice(0, room);
+      };
       try {
-        // Streaming keeps long commands off the sync exec path and avoids the
-        // 10 MiB non-streaming body cap; the caller enforces its own output caps.
         const r = await sbx.commands.run(command, {
           timeoutMs,
           onStdout: (chunk) => {
-            stdout += chunk;
+            stdout = take(stdout, chunk);
           },
           onStderr: (chunk) => {
-            stderr += chunk;
+            stderr = take(stderr, chunk);
           },
         });
         return {
-          stdout: stdout || r.stdout || "",
-          stderr: stderr || r.stderr || "",
+          stdout: stdout || (r.stdout ?? "").slice(0, cap),
+          stderr: stderr || (r.stderr ?? "").slice(0, cap),
           exitCode: r.exitCode,
-          ...(r.truncated ? { truncated: true } : {}),
+          ...(truncated || r.truncated ? { truncated: true } : {}),
         };
       } catch (err) {
         if (isGoneError(err)) gone(sbx.id, err);
@@ -149,8 +159,6 @@ export function createSdkSuperserveClient(opts: SdkSuperserveClientOptions): Sup
         return await sbx.files.read(absPath);
       } catch (err) {
         if (isFileMissing(err)) {
-          // A 404 is ambiguous between "file missing" and "sandbox gone"; only
-          // the sandbox status can tell them apart.
           const status = await sbx.getInfo().then(
             (i) => i.status,
             () => "deleted",

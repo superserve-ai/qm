@@ -58,7 +58,6 @@ export function installFakeSuperserve(): FakeSuperserve {
     throw new SuperserveSandboxGoneError(r.id, "sandbox was not found");
   };
 
-  // The SDK resumes a paused sandbox transparently on the next data-plane call.
   const alive = (r: FakeRecord): void => {
     if (r.expired) gone(r);
     if (r.status === "paused") {

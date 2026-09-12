@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { WorkspaceLayer } from "../types.ts";
 import type { WorkspaceStore } from "../workspace/workspace-store.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
+import { createNoopAdvisoryLock, type AdvisoryLock } from "../persistence/advisory-lock.ts";
 import { createMemoryMap } from "../persistence/durable-map.ts";
 import { createKeyedQueue } from "../util/async.ts";
 import { swallowAs, errMessage } from "../util/errors.ts";
@@ -52,6 +53,8 @@ const DEFAULT_RETENTION_SEC = 30 * 24 * 3600;
 const SCRATCH_IDLE_PAUSE_SEC = 10 * 60;
 const PREP_TIMEOUT_SEC = 60;
 const TIMEOUT_EXIT_CODE = 124;
+const OUTPUT_CAP_BYTES = 2 * 1024 * 1024;
+const TRUNCATED_NOTICE = "[superserve: output truncated at 2 MiB; redirect large output to a file]";
 
 export const SUPERSERVE_METADATA = {
   scope: "qm_scope",
@@ -81,6 +84,7 @@ export interface SuperserveSandboxOptions extends BlobStagingOptions {
   credentialPaths?: CredentialPathSpec[];
   layerToolFiles?: () => readonly LayerInstallFile[];
   store?: DurableMap<StoredSuperserveSandbox>;
+  advisoryLock?: AdvisoryLock;
   onError?: (e: { category: string; code: string; message: string; scopeLabel?: string }) => void;
 }
 
@@ -104,6 +108,8 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         }
       : undefined;
   const store = opts.store ?? createMemoryMap<StoredSuperserveSandbox>();
+  const advisoryLock = opts.advisoryLock ?? createNoopAdvisoryLock();
+  const lockKey = (scope: string): string => `superserve-provision:${scope}`;
   const provisionQueue = createKeyedQueue<string>();
 
   const liveByName = new Map<string, Live>();
@@ -123,8 +129,6 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     [SUPERSERVE_METADATA.kind]: "scope",
   });
 
-  // The template decides the login user, so the home directory is discovered
-  // once per live session rather than assumed.
   async function detectHome(session: SuperserveSession): Promise<string> {
     const r = await session.run('printf %s "${HOME:-}"', { timeoutMs: 30_000 });
     const home = r.exitCode === 0 ? r.stdout.trim() : "";
@@ -143,64 +147,64 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     name: string,
     onStatus?: (text: string) => void,
   ): Promise<{ live: Live; coldStart: boolean }> {
-    return provisionQueue(scope, async () => {
-      const cached = liveByName.get(name);
-      if (cached) return { live: cached, coldStart: false };
+    return provisionQueue(scope, () =>
+      advisoryLock.withLock(lockKey(scope), async () => {
+        const cached = liveByName.get(name);
+        if (cached) return { live: cached, coldStart: false };
 
-      const stored = await store.get(scope);
-      if (stored) {
-        try {
-          const session = await client.connect(stored.sandboxId);
-          const live = await adopt(name, session, stored.homeDir);
-          await store.merge(scope, { lifecycle: "running", preservationError: undefined, homeDir: live.homeDir });
-          return { live, coldStart: false };
-        } catch (err) {
-          if (!(err instanceof SuperserveSandboxGoneError)) throw err;
-          await store.delete(scope);
+        const stored = await store.get(scope);
+        if (stored) {
+          try {
+            const session = await client.connect(stored.sandboxId);
+            const live = await adopt(name, session, stored.homeDir);
+            await store.merge(scope, { lifecycle: "running", preservationError: undefined, homeDir: live.homeDir });
+            return { live, coldStart: false };
+          } catch (err) {
+            if (!(err instanceof SuperserveSandboxGoneError)) throw err;
+            await store.delete(scope);
+          }
         }
-      }
 
-      // A core restart without durable storage, or a lost record: the sandbox
-      // itself is the source of truth, found by its scope metadata.
-      const listed = await client.list({ [SUPERSERVE_METADATA.scope]: name });
-      for (const summary of listed) {
-        try {
-          const session = await client.connect(summary.id);
-          const live = await adopt(name, session);
-          await store.put(scope, {
-            sandboxId: session.id,
-            createdAtMs: Date.now(),
-            lifecycle: "running",
-            homeDir: live.homeDir,
-          });
-          return { live, coldStart: false };
-        } catch (err) {
-          if (!(err instanceof SuperserveSandboxGoneError)) throw err;
+        const listed = await client.list({ [SUPERSERVE_METADATA.scope]: name });
+        for (const summary of listed) {
+          try {
+            const session = await client.connect(summary.id);
+            const live = await adopt(name, session);
+            await store.put(scope, {
+              sandboxId: session.id,
+              createdAtMs: Date.now(),
+              lifecycle: "running",
+              homeDir: live.homeDir,
+            });
+            return { live, coldStart: false };
+          } catch (err) {
+            if (!(err instanceof SuperserveSandboxGoneError)) throw err;
+          }
         }
-      }
 
-      try {
-        onStatus?.("Creating the sandbox…");
-      } catch (error) {
-        void error;
-      }
-      const session = await client.create({
-        name,
-        metadata: scopeMetadata(name),
-        ...(opts.template ? { template: opts.template } : {}),
-        timeoutSeconds: idlePauseSec,
-        autoDeleteSeconds: retentionSec,
-        ...(network ? { network } : {}),
-      });
-      const live = await adopt(name, session);
-      await store.put(scope, {
-        sandboxId: session.id,
-        createdAtMs: Date.now(),
-        lifecycle: "running",
-        homeDir: live.homeDir,
-      });
-      return { live, coldStart: true };
-    });
+        try {
+          onStatus?.("Creating the sandbox…");
+        } catch (error) {
+          void error;
+        }
+        const session = await client.create({
+          name,
+          metadata: scopeMetadata(name),
+          ...(opts.template ? { template: opts.template } : {}),
+          timeoutSeconds: idlePauseSec,
+          autoDeleteSeconds: retentionSec,
+          ...(network ? { network } : {}),
+        });
+        const live = await adopt(name, session);
+        await store.put(scope, {
+          sandboxId: session.id,
+          createdAtMs: Date.now(),
+          lifecycle: "running",
+          homeDir: live.homeDir,
+        });
+        return { live, coldStart: true };
+      }),
+    );
   }
 
   async function createScratch(name: string): Promise<Live> {
@@ -241,12 +245,25 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     }
   }
 
+  function spooledScript(script: string, timeoutSec: number): string {
+    return [
+      `o=$(mktemp) && e=$(mktemp) || exit 1`,
+      `timeout ${timeoutSec} sh -c ${shq(script)} >"$o" 2>"$e"; rc=$?`,
+      `head -c ${OUTPUT_CAP_BYTES} "$o"`,
+      `head -c ${OUTPUT_CAP_BYTES} "$e" >&2`,
+      `if [ "$(wc -c <"$o")" -gt ${OUTPUT_CAP_BYTES} ] || [ "$(wc -c <"$e")" -gt ${OUTPUT_CAP_BYTES} ]; then echo ${shq(TRUNCATED_NOTICE)} >&2; fi`,
+      `rm -f "$o" "$e"`,
+      `exit $rc`,
+    ].join("; ");
+  }
+
   async function execRaw(name: string, script: string, timeoutSec: number): Promise<ExecResult> {
     return withLive(name, async ({ session }) => {
-      const r = await session.run(`timeout ${timeoutSec} sh -c ${shq(script)}`, {
+      const r = await session.run(spooledScript(script, timeoutSec), {
         timeoutMs: timeoutSec * 1000 + 30_000,
+        maxOutputBytes: OUTPUT_CAP_BYTES,
       });
-      const stderr = r.truncated ? `${r.stderr}\n[superserve: output truncated by the sandbox host]` : r.stderr;
+      const stderr = r.truncated ? `${r.stderr}\n${TRUNCATED_NOTICE}` : r.stderr;
       return { stdout: r.stdout, stderr, code: r.exitCode, timedOut: r.exitCode === TIMEOUT_EXIT_CODE };
     });
   }
@@ -321,7 +338,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
 
   const sandbox: Sandbox = {
     destroyScope(scopeId: string): Promise<void> {
-      return provisionQueue(scopeId, () => destroyStoredScope(scopeId));
+      return provisionQueue(scopeId, () => advisoryLock.withLock(lockKey(scopeId), () => destroyStoredScope(scopeId)));
     },
 
     profile,
@@ -510,7 +527,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
   };
 
   async function teardownScope(handle: SandboxHandle, scope: string, tdOpts?: TeardownOptions): Promise<void> {
-    if (tdOpts?.destroy) return destroyStoredScope(scope);
+    if (tdOpts?.destroy) return advisoryLock.withLock(lockKey(scope), () => destroyStoredScope(scope));
     const live = liveByName.get(handle.id);
     if (!live || tdOpts?.keepWarm) return;
     try {

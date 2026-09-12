@@ -70,7 +70,7 @@ export function installFakeSuperserve(): FakeSuperserve {
 
   const remap = (r: FakeRecord, script: string): string =>
     `export HOME=${JSON.stringify(r.home)}; ` +
-    script.replace(/\btimeout \d+ /g, "").replace(/(^|[^A-Za-z0-9._/-])\/tmp\//g, `$1${r.home}/tmp/`);
+    script.replace(/\btimeout (?:-k \d+ )?\d+ /g, "").replace(/(^|[^A-Za-z0-9._/-])\/tmp\//g, `$1${r.home}/tmp/`);
 
   const hostPath = (r: FakeRecord, absPath: string): string =>
     absPath.startsWith("/tmp/") ? join(r.home, "tmp", absPath.slice(5)) : absPath;

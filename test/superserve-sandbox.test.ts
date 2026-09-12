@@ -36,10 +36,19 @@ beforeEach(() => {
 });
 after(() => fake?.cleanup());
 
-test("profile advertises resident disk, process sessions, and the superserve backend", () => {
+test("profile advertises resident disk, process sessions, and the template's toolchain", () => {
   assert.equal(sandbox.profile.backend, "superserve");
   assert.equal(sandbox.profile.writablePersistence, "resident_disk");
   assert.equal(supportsProcessSessions(sandbox), true);
+  for (const tool of ["node", "gh", "aws", "claude", "codex"])
+    assert.ok(sandbox.profile.spec?.tools?.includes(tool), tool);
+  assert.ok(!sandbox.profile.spec?.notInstalled?.includes("gh"));
+});
+
+test("commands are run under a timeout that force-kills a process ignoring SIGTERM", async () => {
+  const h = await sandbox.provision(layers);
+  await sandbox.run(h, "true");
+  assert.ok(fake.execScripts().some((s) => /\btimeout -k \d+ \d+ sh -c /.test(s)));
 });
 
 test("provision creates one sandbox per scope with scope metadata and lifecycle knobs", async () => {

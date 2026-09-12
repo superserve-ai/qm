@@ -53,6 +53,7 @@ const DEFAULT_RETENTION_SEC = 30 * 24 * 3600;
 const SCRATCH_IDLE_PAUSE_SEC = 10 * 60;
 const PREP_TIMEOUT_SEC = 60;
 const TIMEOUT_EXIT_CODE = 124;
+const KILL_AFTER_SEC = 10;
 const OUTPUT_CAP_BYTES = 2 * 1024 * 1024;
 const TRUNCATED_NOTICE = "[superserve: output truncated at 2 MiB; redirect large output to a file]";
 
@@ -262,7 +263,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
   function spooledScript(script: string, timeoutSec: number): string {
     return [
       `o=$(mktemp) && e=$(mktemp) || exit 1`,
-      `timeout ${timeoutSec} sh -c ${shq(script)} >"$o" 2>"$e"; rc=$?`,
+      `timeout -k ${KILL_AFTER_SEC} ${timeoutSec} sh -c ${shq(script)} >"$o" 2>"$e"; rc=$?`,
       `head -c ${OUTPUT_CAP_BYTES} "$o"`,
       `head -c ${OUTPUT_CAP_BYTES} "$e" >&2`,
       `if [ "$(wc -c <"$o")" -gt ${OUTPUT_CAP_BYTES} ] || [ "$(wc -c <"$e")" -gt ${OUTPUT_CAP_BYTES} ]; then echo ${shq(TRUNCATED_NOTICE)} >&2; fi`,
@@ -291,10 +292,24 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       os: "Ubuntu — Superserve Firecracker microVM (disk persists across pause/resume; publish durable work to git or Files)",
       runtimes: ["Node", "Python 3"],
       get tools() {
-        return visibleTools(["git", "curl", "jq", "tar", "python3", ...(opts.extraTools ?? [])]);
+        return visibleTools([
+          "git",
+          "curl",
+          "jq",
+          "tar",
+          "python3",
+          "node",
+          "npm",
+          "gh",
+          "aws",
+          "claude",
+          "codex",
+          "x-api",
+          ...(opts.extraTools ?? []),
+        ]);
       },
       get notInstalled() {
-        return visibleNotInstalled(["gh", "aws", "gcloud", "kubectl", "flyctl", "glab"], opts.extraTools ?? []);
+        return visibleNotInstalled(["gcloud", "kubectl", "flyctl", "glab"], opts.extraTools ?? []);
       },
       homeDir: configuredHome,
       workdir: workspaceDirOf(configuredHome),

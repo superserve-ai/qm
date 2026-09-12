@@ -74,6 +74,18 @@ test("egress allow/deny lists are applied at create time", async () => {
   });
 });
 
+test("adopting an existing sandbox reapplies the configured egress policy", async () => {
+  sandbox = make();
+  await sandbox.provision(layers);
+  assert.equal(fake.current(scopeName())?.network, undefined);
+
+  const tightened = make({ egressDeny: ["0.0.0.0/0"], egressAllow: ["api.anthropic.com"] });
+  await tightened.provision(layers);
+  assert.equal(fake.createdCount(scopeName()), 1);
+  assert.deepEqual(fake.current(scopeName())?.network, { allowOut: ["api.anthropic.com"], denyOut: ["0.0.0.0/0"] });
+  assert.ok(fake.calls().some((c) => c.startsWith("update:")));
+});
+
 test("template and prefix flow through to creation", async () => {
   sandbox = make({ template: "qm-agent-1.2.3" });
   await sandbox.provision(layers);

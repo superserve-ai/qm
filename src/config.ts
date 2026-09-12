@@ -891,7 +891,7 @@ export function enabledSandboxBackends(config: Config): Array<Config["sandboxBac
     sprites: Boolean(config.spritesSandbox?.token),
     smolmachines: Boolean(config.smolmachinesSandbox?.token),
     agent37: Boolean(config.agent37Sandbox?.apiKey),
-    superserve: Boolean(config.superserveSandbox?.apiKey),
+    superserve: Boolean(config.superserveSandbox?.apiKey && config.superserveSandbox?.template),
     e2b: Boolean(config.e2bSandbox?.apiKey),
     modal: Boolean(config.modalSandbox?.tokenId && config.modalSandbox?.tokenSecret),
     aws: Boolean(config.awsSandbox?.s3Bucket),

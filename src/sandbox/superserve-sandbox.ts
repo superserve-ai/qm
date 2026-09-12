@@ -135,6 +135,10 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     return home.startsWith("/") ? home : configuredHome;
   }
 
+  async function reconcileNetwork(session: SuperserveSession): Promise<void> {
+    if (network) await session.update({ network });
+  }
+
   async function adopt(name: string, session: SuperserveSession, knownHome?: string): Promise<Live> {
     const homeDir = knownHome ?? (await detectHome(session));
     const live: Live = { session, homeDir };
@@ -156,6 +160,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         if (stored) {
           try {
             const session = await client.connect(stored.sandboxId);
+            await reconcileNetwork(session);
             const live = await adopt(name, session, stored.homeDir);
             await store.merge(scope, { lifecycle: "running", preservationError: undefined, homeDir: live.homeDir });
             return { live, coldStart: false };
@@ -169,6 +174,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         for (const summary of listed) {
           try {
             const session = await client.connect(summary.id);
+            await reconcileNetwork(session);
             const live = await adopt(name, session);
             await store.put(scope, {
               sandboxId: session.id,

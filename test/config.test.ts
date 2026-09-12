@@ -5,6 +5,7 @@ import {
   harnessCarriedModelAuth,
   baseModelProviders,
   boolEnv,
+  enabledSandboxBackends,
   loadConfig,
   numEnv,
   CONFIG_DEFAULTS,
@@ -397,6 +398,17 @@ test("SANDBOX_BACKEND: unset defaults to local (dev only); the retired secondary
       SUPERSERVE_API_KEY: "ss_live_k",
     }).sandboxBackend,
     "superserve",
+  );
+  assert.ok(
+    !enabledSandboxBackends(loadConfig({ SANDBOX_BACKEND: "local", SUPERSERVE_API_KEY: "ss_live_k" })).includes(
+      "superserve",
+    ),
+    "a stray key without a template must not enable the secondary backend",
+  );
+  assert.ok(
+    enabledSandboxBackends(
+      loadConfig({ SANDBOX_BACKEND: "local", SUPERSERVE_API_KEY: "ss_live_k", SUPERSERVE_TEMPLATE: "qm-agent-1.0.0" }),
+    ).includes("superserve"),
   );
   const config = loadConfig({ SANDBOX_SECONDARY_BACKEND: "smolmachines" });
   assert.equal(config.sandboxBackend, "local");

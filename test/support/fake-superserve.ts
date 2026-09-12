@@ -1,0 +1,214 @@
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import {
+  SuperserveSandboxGoneError,
+  type SuperserveClient,
+  type SuperserveCommandResult,
+  type SuperserveCreateOptions,
+  type SuperserveNetwork,
+  type SuperserveSandboxInfo,
+  type SuperserveSandboxState,
+  type SuperserveSession,
+  type SuperserveUpdate,
+} from "../../src/sandbox/superserve-client.ts";
+
+interface FakeRecord {
+  id: string;
+  name: string;
+  status: SuperserveSandboxState;
+  expired: boolean;
+  metadata: Record<string, string>;
+  network?: SuperserveNetwork;
+  timeoutSeconds?: number;
+  autoDeleteSeconds?: number;
+  template?: string;
+  home: string;
+  createdAt: number;
+  resumes: number;
+}
+
+export interface FakeSuperserve {
+  client: SuperserveClient;
+  current(name: string): FakeRecord | null;
+  createdCount(name: string): number;
+  homeDir(name: string): string;
+  pause(name: string): void;
+  expire(name: string): void;
+  execScripts(): string[];
+  calls(): string[];
+  cleanup(): void;
+}
+
+export function installFakeSuperserve(): FakeSuperserve {
+  const root = mkdtempSync(join(tmpdir(), "fake-superserve-"));
+  const records = new Map<string, FakeRecord>();
+  const execScripts: string[] = [];
+  const calls: string[] = [];
+  let nextId = 1;
+  let clock = 0;
+
+  const byName = (name: string): FakeRecord | undefined => {
+    const all = [...records.values()].filter((r) => r.name === name).sort((a, b) => b.createdAt - a.createdAt);
+    return all.find((r) => !r.expired) ?? all[0];
+  };
+
+  const gone = (r: FakeRecord): never => {
+    throw new SuperserveSandboxGoneError(r.id, "sandbox was not found");
+  };
+
+  // The SDK resumes a paused sandbox transparently on the next data-plane call.
+  const alive = (r: FakeRecord): void => {
+    if (r.expired) gone(r);
+    if (r.status === "paused") {
+      r.status = "active";
+      r.resumes += 1;
+    }
+  };
+
+  const remap = (r: FakeRecord, script: string): string =>
+    `export HOME=${JSON.stringify(r.home)}; ` +
+    script.replace(/\btimeout \d+ /g, "").replace(/(^|[^A-Za-z0-9._/-])\/tmp\//g, `$1${r.home}/tmp/`);
+
+  const hostPath = (r: FakeRecord, absPath: string): string =>
+    absPath.startsWith("/tmp/") ? join(r.home, "tmp", absPath.slice(5)) : absPath;
+
+  const session = (r: FakeRecord): SuperserveSession => ({
+    id: r.id,
+    async run(command): Promise<SuperserveCommandResult> {
+      alive(r);
+      execScripts.push(command);
+      mkdirSync(join(r.home, "tmp"), { recursive: true });
+      const spawned = spawnSync("sh", ["-c", remap(r, command)], {
+        encoding: "buffer",
+        maxBuffer: 128 * 1024 * 1024,
+        env: { ...process.env, COPYFILE_DISABLE: "1" },
+      });
+      return {
+        stdout: (spawned.stdout ?? Buffer.alloc(0)).toString("utf8"),
+        stderr: (spawned.stderr ?? Buffer.alloc(0)).toString("utf8"),
+        exitCode: spawned.status ?? (spawned.signal ? 137 : -1),
+      };
+    },
+    async readFileBytes(absPath): Promise<Uint8Array | null> {
+      alive(r);
+      const p = hostPath(r, absPath);
+      if (!existsSync(p)) return null;
+      return new Uint8Array(readFileSync(p));
+    },
+    async writeFileBytes(absPath, data): Promise<void> {
+      alive(r);
+      const p = hostPath(r, absPath);
+      mkdirSync(dirname(p), { recursive: true });
+      writeFileSync(p, Buffer.from(data));
+    },
+    async update(patch: SuperserveUpdate): Promise<void> {
+      if (r.expired) gone(r);
+      calls.push(`update:${r.id}`);
+      if (patch.network !== undefined) r.network = patch.network;
+      if (patch.metadata !== undefined) r.metadata = { ...r.metadata, ...patch.metadata };
+      if (patch.timeoutSeconds !== undefined) r.timeoutSeconds = patch.timeoutSeconds ?? undefined;
+      if (patch.autoDeleteSeconds !== undefined) r.autoDeleteSeconds = patch.autoDeleteSeconds ?? undefined;
+    },
+    async pause(): Promise<void> {
+      if (r.expired) gone(r);
+      calls.push(`pause:${r.id}`);
+      r.status = "paused";
+    },
+    async kill(): Promise<void> {
+      calls.push(`kill:${r.id}`);
+      r.expired = true;
+      r.status = "deleted";
+      rmSync(r.home, { recursive: true, force: true });
+    },
+  });
+
+  const info = (r: FakeRecord): SuperserveSandboxInfo => ({
+    id: r.id,
+    name: r.name,
+    status: r.status,
+    metadata: r.metadata,
+    vcpuCount: 2,
+    memoryMib: 2048,
+    ...(r.timeoutSeconds !== undefined ? { timeoutSeconds: r.timeoutSeconds } : {}),
+  });
+
+  const client: SuperserveClient = {
+    async create(opts: SuperserveCreateOptions): Promise<SuperserveSession> {
+      calls.push(`create:${opts.name}`);
+      const id = `sbx-${nextId++}`;
+      const r: FakeRecord = {
+        id,
+        name: opts.name,
+        status: "active",
+        expired: false,
+        metadata: { ...opts.metadata },
+        ...(opts.network ? { network: opts.network } : {}),
+        ...(opts.timeoutSeconds !== undefined ? { timeoutSeconds: opts.timeoutSeconds } : {}),
+        ...(opts.autoDeleteSeconds !== undefined ? { autoDeleteSeconds: opts.autoDeleteSeconds } : {}),
+        ...(opts.template ? { template: opts.template } : {}),
+        home: join(root, id),
+        createdAt: ++clock,
+        resumes: 0,
+      };
+      mkdirSync(r.home, { recursive: true });
+      records.set(id, r);
+      return session(r);
+    },
+    async connect(sandboxId): Promise<SuperserveSession> {
+      calls.push(`connect:${sandboxId}`);
+      const r = records.get(sandboxId);
+      if (!r || r.expired) throw new SuperserveSandboxGoneError(sandboxId, "sandbox was not found");
+      alive(r);
+      return session(r);
+    },
+    async info(sandboxId): Promise<SuperserveSandboxInfo> {
+      const r = records.get(sandboxId);
+      if (!r || r.expired) throw new SuperserveSandboxGoneError(sandboxId, "sandbox was not found");
+      return info(r);
+    },
+    async list(metadata): Promise<SuperserveSandboxInfo[]> {
+      return [...records.values()]
+        .filter((r) => !r.expired && Object.entries(metadata).every(([k, v]) => r.metadata[k] === v))
+        .map(info);
+    },
+    async kill(sandboxId): Promise<void> {
+      calls.push(`kill:${sandboxId}`);
+      const r = records.get(sandboxId);
+      if (!r) return;
+      r.expired = true;
+      r.status = "deleted";
+      rmSync(r.home, { recursive: true, force: true });
+    },
+  };
+
+  return {
+    client,
+    current: (name) => {
+      const r = byName(name);
+      return r && !r.expired ? r : null;
+    },
+    createdCount: (name) => [...records.values()].filter((r) => r.name === name).length,
+    homeDir: (name) => {
+      const r = byName(name);
+      if (!r) throw new Error(`fake-superserve: no sandbox named ${name}`);
+      return r.home;
+    },
+    pause: (name) => {
+      const r = byName(name);
+      if (r) r.status = "paused";
+    },
+    expire: (name) => {
+      const r = byName(name);
+      if (r) {
+        r.expired = true;
+        r.status = "deleted";
+        rmSync(r.home, { recursive: true, force: true });
+      }
+    },
+    execScripts: () => [...execScripts],
+    calls: () => [...calls],
+    cleanup: () => rmSync(root, { recursive: true, force: true }),
+  };
+}

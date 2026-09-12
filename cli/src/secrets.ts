@@ -184,6 +184,13 @@ export const FIRST_PARTY_SECRET_SPECS: readonly SecretSpec[] = [
     generate: "mint a key in the Agent37 dashboard (https://agent37.com/dashboard/cloud/api-keys)",
   },
   {
+    name: "SUPERSERVE_API_KEY",
+    service: "core",
+    required: { when: { kind: "env-equals", service: "core", name: "SANDBOX_BACKEND", value: "superserve" } },
+    description: "Superserve API key for the agent-computer substrate (Firecracker microVM per scope).",
+    generate: "create an API key in the Superserve console (https://console.superserve.ai/api-keys)",
+  },
+  {
     name: "DATABASE_URL",
     service: "core",
     required: { when: { kind: "target", target: "aws" } },

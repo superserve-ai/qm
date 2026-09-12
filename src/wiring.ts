@@ -174,6 +174,8 @@ import { createLocalSandbox } from "./sandbox/local-sandbox.ts";
 import { createSpritesSandbox } from "./sandbox/sprites-sandbox.ts";
 import { createSmolmachinesSandbox } from "./sandbox/smolmachines-sandbox.ts";
 import { createAgent37Sandbox } from "./sandbox/agent37-sandbox.ts";
+import { createSuperserveSandbox, type StoredSuperserveSandbox } from "./sandbox/superserve-sandbox.ts";
+import { createSdkSuperserveClient } from "./sandbox/superserve-client.ts";
 import { createE2bSandbox, type StoredE2bSandbox } from "./sandbox/e2b-sandbox.ts";
 import { createSdkE2bClient } from "./sandbox/e2b-client.ts";
 import { createS3SnapshotStore } from "./sandbox/home-snapshot.ts";
@@ -870,6 +872,35 @@ export function buildApp(
       ...(config.apiBaseUrl ? { apiBaseUrl: config.apiBaseUrl } : {}),
       onError: sandboxOnError,
     });
+  const superserveBodies = artifactMap<StoredSuperserveSandbox>("superserve_sandbox_bodies");
+  const buildSuperserve = (): Sandbox => {
+    const ss = config.superserveSandbox;
+    if (!ss.apiKey) throw new Error("SANDBOX_BACKEND=superserve requires SUPERSERVE_API_KEY");
+    return createSuperserveSandbox(workspace, {
+      client: createSdkSuperserveClient({
+        apiKey: ss.apiKey,
+        ...(ss.baseUrl ? { baseUrl: ss.baseUrl } : {}),
+        ...(ss.template ? { template: ss.template } : {}),
+      }),
+      ...(ss.namePrefix ? { namePrefix: ss.namePrefix } : {}),
+      ...(ss.template ? { template: ss.template } : {}),
+      ...(ss.homeDir ? { homeDir: ss.homeDir } : {}),
+      ...(ss.idlePauseSec !== undefined ? { idlePauseSec: ss.idlePauseSec } : {}),
+      ...(ss.retentionSec !== undefined ? { retentionSec: ss.retentionSec } : {}),
+      ...(ss.egressAllow ? { egressAllow: ss.egressAllow } : {}),
+      ...(ss.egressDeny ? { egressDeny: ss.egressDeny } : {}),
+      ...(ss.defaultTimeoutSec ? { defaultTimeoutSec: ss.defaultTimeoutSec } : {}),
+      extraTools: deploymentLayer.advertisedTools,
+      credentialPaths: deploymentLayer.credentialPaths,
+      layerToolFiles: () => deploymentLayer.installFiles,
+      blobTransfer,
+      ...(config.signingSecret ? { signingSecret: config.signingSecret } : {}),
+      ...(config.capabilitySecret ? { capabilitySecret: config.capabilitySecret } : {}),
+      ...(config.apiBaseUrl ? { apiBaseUrl: config.apiBaseUrl } : {}),
+      store: superserveBodies,
+      onError: sandboxOnError,
+    });
+  };
   const buildAws = (): Sandbox => {
     if (!config.awsSandbox.s3Bucket) throw new Error("SANDBOX_BACKEND=aws requires AWS_SANDBOX_S3_BUCKET");
     return createAwsSandbox(workspace, {
@@ -907,6 +938,7 @@ export function buildApp(
     aws: buildAws,
     porter: buildPorter,
     agent37: buildAgent37,
+    superserve: buildSuperserve,
   };
   const enabledBackends = new Set(enabledSandboxBackends(config));
   const sandboxBackends: Partial<Record<SandboxBackendName, Sandbox>> = {

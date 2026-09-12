@@ -12,7 +12,7 @@ export interface SuperserveNetwork {
 
 export type SuperserveSandboxState = "starting" | "active" | "pausing" | "paused" | "resuming" | "failed" | "deleted";
 
-export interface SuperserveSandboxSummary {
+interface SuperserveSandboxSummary {
   id: string;
   name: string;
   status: SuperserveSandboxState;
@@ -26,7 +26,7 @@ export interface SuperserveSandboxInfo extends SuperserveSandboxSummary {
   autoDeleteAtMs?: number;
 }
 
-export interface SuperserveRunOptions {
+interface SuperserveRunOptions {
   timeoutMs?: number;
   maxOutputBytes?: number;
 }

@@ -138,6 +138,15 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     [SUPERSERVE_METADATA.egress]: egressTag,
   });
 
+  async function forget(scope: string, sandboxId: string): Promise<void> {
+    if (store.deleteIf) {
+      await store.deleteIf(scope, (record) => record.sandboxId === sandboxId);
+      return;
+    }
+    const stored = await store.get(scope);
+    if (stored?.sandboxId === sandboxId) await store.delete(scope);
+  }
+
   async function reconnect(scope: string, sandboxId: string): Promise<SuperserveSession> {
     const info = await client.info(sandboxId);
     const stale = info.metadata[SUPERSERVE_METADATA.egress] !== egressTag;
@@ -147,7 +156,8 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       reportError("sandbox_egress", "policy_changed", message, scope);
       throw new SuperserveSandboxGoneError(sandboxId, message);
     }
-    await client.update(sandboxId, { timeoutSeconds: idlePauseSec, autoDeleteSeconds: retentionSec });
+    const timeoutSeconds = Math.max(info.timeoutSeconds ?? 0, idlePauseSec);
+    await client.update(sandboxId, { timeoutSeconds, autoDeleteSeconds: retentionSec });
     const session = await client.connect(sandboxId);
     if (stale)
       await session.update({ network: adoptedNetwork, metadata: { ...info.metadata, ...scopeMetadata(info.name) } });
@@ -181,7 +191,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
           } catch (err) {
             if (!(err instanceof SuperserveSandboxGoneError)) throw err;
             liveByName.delete(name);
-            await store.delete(scope);
+            await forget(scope, cached.session.id);
           }
         }
 
@@ -193,7 +203,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
             return { live, coldStart: false };
           } catch (err) {
             if (!(err instanceof SuperserveSandboxGoneError)) throw err;
-            await store.delete(scope);
+            await forget(scope, stored.sandboxId);
           }
         }
 
@@ -260,7 +270,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       if (!(err instanceof SuperserveSandboxGoneError)) throw err;
       liveByName.delete(name);
       const scope = scopeByName.get(name);
-      if (scope !== undefined) await store.delete(scope);
+      if (scope !== undefined) await forget(scope, live.session.id);
       throw new Error(`superserve sandbox for ${name} is gone; the next provision creates a replacement`, {
         cause: err,
       });
@@ -451,7 +461,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       const exports = Object.entries(handle.env ?? {})
         .map(([k, v]) => `export ${k}=${shq(v)}`)
         .join("; ");
-      const script = `${nonInteractiveShellPrefix()}${exports ? exports + "; " : ""}cd ${handle.rootDir} 2>/dev/null; ${command}`;
+      const script = `${nonInteractiveShellPrefix()}${exports ? exports + "; " : ""}cd ${shq(handle.rootDir)} 2>/dev/null; ${command}`;
       const signal = execOpts?.signal;
       if (!signal) return execRaw(handle.id, script, timeoutSec);
       const killUid = randomUUID();
@@ -518,7 +528,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         const gone = e instanceof SuperserveSandboxGoneError;
         if (gone) {
           liveByName.delete(name);
-          await store.delete(scopeId);
+          await forget(scopeId, stored.sandboxId);
         }
         return {
           recovery,
@@ -559,7 +569,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     } catch (err) {
       if (!(err instanceof SuperserveSandboxGoneError)) throw err;
       liveByName.delete(name);
-      await store.delete(scope);
+      await forget(scope, live.session.id);
     }
   }
 

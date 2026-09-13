@@ -13,6 +13,7 @@ import { createLocalWorkspaceStore } from "../src/workspace/workspace-store.ts";
 import { supportsProcessSessions, computerVerdict } from "../src/sandbox/sandbox.ts";
 import { createMemoryMap, type DurableMap } from "../src/persistence/durable-map.ts";
 import { scopeId } from "../src/types.ts";
+import { shq } from "../src/util/shell.ts";
 import { installFakeSuperserve, type FakeSuperserve } from "./support/fake-superserve.ts";
 import type { Sandbox } from "../src/sandbox/sandbox.ts";
 
@@ -68,6 +69,10 @@ test("provision creates one sandbox per scope with scope metadata and lifecycle 
   const h = await sandbox.provision(layers, { env: { MY_VAR: "v1" } });
   assert.equal(h.coldStart, true);
   const r = await sandbox.run(h, "pwd; echo VAR=$MY_VAR");
+  assert.ok(
+    fake.execScripts().some((script) => script.includes("cd " + shq("/root/workspace").replace(/'/g, "'\\''"))),
+    "workspace path quoted",
+  );
   assert.equal(r.code, 0);
   assert.match(r.stdout, /workspace/);
   assert.match(r.stdout, /VAR=v1/);
@@ -152,10 +157,11 @@ test("an active sandbox gets a changed egress policy applied before its first co
   assert.ok(meta[SUPERSERVE_METADATA.egress]);
 
   const relaxed = make({ idlePauseSec: 120, retentionSec: 3600 });
-  await relaxed.provision(layers);
+  const relaxedHandle = await relaxed.provision(layers);
   assert.deepEqual(fake.current(scopeName())?.network, { allowOut: [], denyOut: [] });
-  assert.equal(fake.current(scopeName())?.timeoutSeconds, 120);
   assert.equal(fake.current(scopeName())?.autoDeleteSeconds, 3600);
+  await relaxed.teardown(relaxedHandle);
+  assert.equal(fake.current(scopeName())?.timeoutSeconds, 120, "a shorter idle pause lands at the next plain teardown");
 });
 
 test("computerStatus observing a deleted sandbox clears cached state so the next provision replaces it", async () => {
@@ -239,6 +245,38 @@ test("teardown leaves the sandbox to the provider's idle pause; a paused sandbox
   assert.equal(fake.createdCount(scopeName()), 1);
   assert.equal(await sandbox.readFile(again, "keep.txt"), "still here\n");
   assert.equal(fake.current(scopeName())?.status, "active");
+});
+
+test("a gone sandbox never forgets a replacement another instance already recorded", async () => {
+  const store: DurableMap<StoredSuperserveSandbox> = createMemoryMap();
+  sandbox = make({ store });
+  const h = await sandbox.provision(layers);
+  const oldId = fake.current(scopeName())!.id;
+  fake.expire(scopeName());
+  const other = make({ store });
+  const replacement = await other.provision(layers);
+  assert.equal(replacement.coldStart, true);
+  const newId = (await store.get(scope))!.sandboxId;
+  assert.notEqual(newId, oldId);
+
+  await assert.rejects(sandbox.run(h, "echo x"), /is gone/);
+  assert.equal((await store.get(scope))?.sandboxId, newId, "the replacement's record survives");
+  const status = await sandbox.computerStatus!(scope);
+  assert.equal(status.provisioned, true);
+});
+
+test("reconnecting keeps a longer keep-warm timeout until a plain teardown restores it", async () => {
+  sandbox = make({ idlePauseSec: 600, keepWarmSec: 5400 });
+  const h = await sandbox.provision(layers);
+  await sandbox.teardown(h, { keepWarm: true });
+  assert.equal(fake.current(scopeName())?.timeoutSeconds, 5400);
+
+  const other = make({ idlePauseSec: 600, keepWarmSec: 5400 });
+  await other.computerStatus!(scope);
+  const probed = await other.provision(layers);
+  assert.equal(fake.current(scopeName())?.timeoutSeconds, 5400, "another instance's probe keeps the warm window");
+  await other.teardown(probed);
+  assert.equal(fake.current(scopeName())?.timeoutSeconds, 600);
 });
 
 test("keepWarm teardown extends the provider idle pause; a plain teardown restores it", async () => {

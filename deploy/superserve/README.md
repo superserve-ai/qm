@@ -10,6 +10,8 @@ container port (PORT, default 8080)
        └─ core         127.0.0.1:8081 API, runs, Slack, sandboxes; Postgres + S3 backed
 ```
 
+The provisioner must configure the Cloud Run service with CPU always allocated (not request-based) and at least one minimum instance: `config.backgroundWorkEnabled` defaults to `true`, and core's scheduler and Slack socket reconcilers (`src/index.ts`) run independently of inbound requests. Request-based CPU or a zero minimum would let the platform throttle or scale the container to zero between requests, stalling cron work and Slack delivery for idle tenants.
+
 ## Startup and health
 
 1. `node src/migrate-main.ts` runs with core's environment. A non-zero exit stops the container before anything listens.
@@ -43,7 +45,7 @@ Web-ui and portal receive an allowlisted subset of the environment (their own `W
 | `QM_READY_TIMEOUT_MS` | no       | Per-service readiness deadline. Default `120000`.                                            |
 | `SHUTDOWN_DRAIN_MS`   | no       | Core's worker drain window on SIGTERM. Image default `1000`; QM's own default is `10000`.    |
 | `AUTH_EMBEDDED`       | no       | `1`/`0` forces the embedded sign-in broker on/off. Unset: on when `AUTH_SIGNING_JWK` is set. |
-| `ADMIN_ENABLED`       | no       | `0` turns the admin module off in web-ui and stops portal being pointed at it. Default `1`.  |
+| `ADMIN_ENABLED`       | no       | `0` turns the admin module off in web-ui and makes portal 404 on `/admin`. Default `1`.      |
 
 The three port variables must each be a TCP port between 1 and 65535 and must differ from one
 another; `8099` is reserved as well, but only while the embedded broker is running. The two
@@ -127,7 +129,7 @@ Set by the supervisor: `PORT`, `CORE_API_URL=http://127.0.0.1:8081`, `CORE_ORG_I
 
 ### Portal (public front door)
 
-Set by the supervisor: `PORT` (container port), `CORE_API_URL`, `CORE_ORG_ID`, `WEB_UI_UPSTREAM=http://127.0.0.1:8082`, `ADMIN_UPSTREAM=http://127.0.0.1:8082/admin`, `PORTAL_PUBLIC_URL` (default `PUBLIC_WEB_URL`). Shared secrets: `CORE_SIGNING_SECRET`, `PORTAL_IDENTITY_SECRET`, `PORTAL_SESSION_SECRET`.
+Set by the supervisor: `PORT` (container port), `CORE_API_URL`, `CORE_ORG_ID`, `WEB_UI_UPSTREAM=http://127.0.0.1:8082`, `ADMIN_ENABLED` (default `1`; portal 404s `/admin` when `0`), `ADMIN_UPSTREAM=http://127.0.0.1:8082/admin` (set only when admin is enabled), `PORTAL_PUBLIC_URL` (default `PUBLIC_WEB_URL`). Shared secrets: `CORE_SIGNING_SECRET`, `PORTAL_IDENTITY_SECRET`, `PORTAL_SESSION_SECRET`.
 
 In production portal requires an https `PORTAL_PUBLIC_URL`, non-placeholder `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET`, `OIDC_JWKS_URI` for non-Slack issuers, and one trust boundary among `OIDC_ALLOWED_EMAILS`, `OIDC_ALLOWED_EMAIL_DOMAIN`, `PORTAL_EXPECTED_TEAM_ID`. With the embedded broker on, the supervisor fills all of the OIDC values.
 

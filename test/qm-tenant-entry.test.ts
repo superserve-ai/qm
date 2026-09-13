@@ -139,6 +139,14 @@ test("tenant entry rejects a padded SLACK_EVENTS_MODE=http", async () => {
   assert.match(stderr, /SLACK_EVENTS_MODE=http is not supported by this image/);
 });
 
+test("tenant entry rejects an account-scoped eventsMode=http in SLACK_ACCOUNTS", async () => {
+  const { code, stderr } = await runEntry({
+    SLACK_ACCOUNTS: JSON.stringify([{ id: "a", eventsMode: " http " }]),
+  });
+  assert.equal(code, 2);
+  assert.match(stderr, /SLACK_EVENTS_MODE=http is not supported by this image/);
+});
+
 test("tenant entry rejects colliding service ports", async () => {
   const { code, stderr } = await runEntry({ PORT: "45080", QM_CORE_PORT: "45080", AUTH_EMBEDDED: "0" });
   assert.equal(code, 2);

@@ -86,6 +86,7 @@ const PLAYGROUND = process.env.PORTAL_PLAYGROUND === "1";
 const DEPLOYMENTS_ENABLED = process.env.PORTAL_DEPLOYMENTS_ENABLED
   ? process.env.PORTAL_DEPLOYMENTS_ENABLED === "1"
   : !PLAYGROUND;
+const ADMIN_ENABLED = process.env.ADMIN_ENABLED?.trim() !== "0";
 function playgroundIntEnv(name: string, fallback: number): number {
   const raw = process.env[name]?.trim();
   if (!raw) return fallback;
@@ -1091,6 +1092,7 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
     return void res.end();
   }
   if (!DEPLOYMENTS_ENABLED && (seg === "d" || seg === "deployments")) return json(res, 404, { error: "not_found" });
+  if (!ADMIN_ENABLED && seg === "admin") return json(res, 404, { error: "not_found" });
   const isDeployment = DEPLOYMENTS_ENABLED && (seg === "d" || seg === "deployments");
   const surfaceKey = Object.hasOwn(UPSTREAMS, seg) && seg !== "web-ui" ? seg : "web-ui";
 

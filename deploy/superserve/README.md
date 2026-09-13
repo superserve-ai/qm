@@ -184,7 +184,7 @@ docker run --rm --name qm-tenant \
   --env-file deploy/superserve/.env qm-tenant:local
 ```
 
-The harness runs with `NODE_ENV=development` because portal refuses an http `PORTAL_PUBLIC_URL` in production; everything else matches the production wiring. `DATABASE_URL` in the example uses `host.docker.internal:55432`; `postgres:5432` also works on the compose network. MinIO needs the compose network because the SDK addresses the bucket virtual-host style as `qm-tenant.minio` (compose declares that alias; S3 bucket names must be at least three characters).
+The harness runs with `NODE_ENV=development` because portal refuses an http `PORTAL_PUBLIC_URL` in production; everything else matches the production wiring. `DATABASE_URL` in the example uses `postgres:5432` over the compose network, which resolves on every Docker engine; `host.docker.internal:55432` reaches the published port instead, but only where the daemon defines that name. MinIO needs the compose network because the SDK addresses the bucket virtual-host style as `qm-tenant.minio` (compose declares that alias; S3 bucket names must be at least three characters).
 
 Sign in as the admin named in `ADMIN_GRANTS`:
 

@@ -203,7 +203,7 @@ jobs:
         with:
           name: qm-tenant-image
           path: /tmp/qm-tenant.tar
-          retention-days: 30
+          retention-days: 35
           if-no-files-found: error
 
   publish:

@@ -166,6 +166,9 @@ jobs:
     name: Tenant image smoke
     needs: release
     runs-on: ubuntu-latest
+    outputs:
+      image-id: ${{ steps.image.outputs.id }}
+      tarball-sha256: ${{ steps.image.outputs.sha256 }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
         with:
@@ -178,15 +181,30 @@ jobs:
           file: deploy/superserve/Dockerfile
           platforms: linux/amd64
           provenance: false
-          load: true
-          tags: qm-tenant:runtime-smoke
+          outputs: type=docker,dest=/tmp/qm-tenant.tar
+          tags: qm-tenant:release
           build-args: GIT_SHA=${{ needs.release.outputs.sha }}
           cache-from: type=gha,scope=qm-tenant
           cache-to: type=gha,mode=max,scope=qm-tenant
+      - id: image
+        name: Load the built image
+        run: |
+          set -euo pipefail
+          docker load -i /tmp/qm-tenant.tar
+          printf 'id=%s\nsha256=%s\n' \
+            "$(docker image inspect --format '{{ .Id }}' qm-tenant:release)" \
+            "$(sha256sum /tmp/qm-tenant.tar | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       - name: Boot the image
         env:
-          TENANT_IMAGE: qm-tenant:runtime-smoke
+          TENANT_IMAGE: qm-tenant:release
         run: bash deploy/superserve/smoke.sh
+      - name: Keep the booted image for the publish job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: qm-tenant-image
+          path: /tmp/qm-tenant.tar
+          retention-days: 1
+          if-no-files-found: error
 
   publish:
     name: Publish
@@ -203,10 +221,24 @@ jobs:
     env:
       IMAGE: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/superserve/qm-tenant
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - name: Fetch the smoke-tested image
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          ref: ${{ needs.release.outputs.sha }}
-          persist-credentials: false
+          name: qm-tenant-image
+          path: /tmp
+      - name: Load the smoke-tested image
+        env:
+          IMAGE_ID: ${{ needs.smoke.outputs.image-id }}
+          TARBALL_SHA256: ${{ needs.smoke.outputs.tarball-sha256 }}
+        run: |
+          set -euo pipefail
+          echo "$TARBALL_SHA256  /tmp/qm-tenant.tar" | sha256sum -c -
+          docker load -i /tmp/qm-tenant.tar
+          loaded=$(docker image inspect --format '{{ .Id }}' qm-tenant:release)
+          if [ "$loaded" != "$IMAGE_ID" ]; then
+            echo "loaded $loaded but the smoke job booted $IMAGE_ID" >&2
+            exit 1
+          fi
       - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
@@ -214,23 +246,27 @@ jobs:
       - name: Configure Docker
         run: gcloud auth configure-docker ${{ vars.GCP_REGION }}-docker.pkg.dev --quiet
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
-      - id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
-        with:
-          context: .
-          file: deploy/superserve/Dockerfile
-          platforms: linux/amd64
-          provenance: false
-          push: true
-          build-args: GIT_SHA=${{ needs.release.outputs.sha }}
-          tags: |
-            ${{ env.IMAGE }}:${{ env.RELEASE_TAG }}
-            ${{ env.IMAGE }}:${{ env.RELEASE_TAG }}-${{ needs.release.outputs.short }}
-          cache-from: type=gha,scope=qm-tenant
-          cache-to: type=gha,mode=max,scope=qm-tenant
+      - id: push
+        name: Push the smoke-tested image
+        env:
+          SHORT: ${{ needs.release.outputs.short }}
+        run: |
+          set -euo pipefail
+          docker tag qm-tenant:release "$IMAGE:$RELEASE_TAG"
+          docker tag qm-tenant:release "$IMAGE:$RELEASE_TAG-$SHORT"
+          docker push "$IMAGE:$RELEASE_TAG"
+          docker push "$IMAGE:$RELEASE_TAG-$SHORT"
+          digest="sha256:$(docker buildx imagetools inspect --raw "$IMAGE:$RELEASE_TAG" | sha256sum | cut -d' ' -f1)"
+          short_digest="sha256:$(docker buildx imagetools inspect --raw "$IMAGE:$RELEASE_TAG-$SHORT" | sha256sum | cut -d' ' -f1)"
+          if [ "$digest" != "$short_digest" ]; then
+            echo "$RELEASE_TAG resolves to $digest but $RELEASE_TAG-$SHORT resolves to $short_digest" >&2
+            exit 1
+          fi
+          docker buildx imagetools inspect "$IMAGE@$digest" > /dev/null
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
       - name: Record the published image
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.push.outputs.digest }}
           SHORT: ${{ needs.release.outputs.short }}
         run: |
           set -euo pipefail

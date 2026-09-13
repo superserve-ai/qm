@@ -40,6 +40,8 @@ export interface FakeSuperserve {
   calls(): string[];
   failNextList(error: Error): void;
   failNextKill(error: Error): void;
+  acceptNetworkUpdateWhilePaused(): void;
+  ignoreNetworkUpdateWhilePaused(): void;
   beforeNextRun(hook: () => Promise<void>): void;
   cleanup(): void;
 }
@@ -54,6 +56,8 @@ export function installFakeSuperserve(): FakeSuperserve {
   let listFailure: Error | null = null;
   let runHook: (() => Promise<void>) | null = null;
   let killFailure: Error | null = null;
+  let pausedNetworkUpdates = false;
+  let silentlyIgnorePausedNetwork = false;
 
   const byName = (name: string): FakeRecord | undefined => {
     const all = [...records.values()].filter((r) => r.name === name).sort((a, b) => b.createdAt - a.createdAt);
@@ -120,9 +124,10 @@ export function installFakeSuperserve(): FakeSuperserve {
     async update(patch: SuperserveUpdate): Promise<void> {
       if (r.expired) gone(r);
       calls.push(`update:${r.id}`);
-      if (patch.network !== undefined && r.status !== "active")
+      const dropNetwork = patch.network !== undefined && r.status !== "active" && silentlyIgnorePausedNetwork;
+      if (patch.network !== undefined && r.status !== "active" && !pausedNetworkUpdates && !dropNetwork)
         throw Object.assign(new Error("Sandbox must be active to update network config"), { statusCode: 409 });
-      if (patch.network !== undefined) r.network = patch.network;
+      if (patch.network !== undefined && !dropNetwork) r.network = patch.network;
       if (patch.metadata !== undefined) r.metadata = { ...patch.metadata };
       if (patch.timeoutSeconds !== undefined) r.timeoutSeconds = patch.timeoutSeconds ?? undefined;
       if (patch.autoDeleteSeconds !== undefined) r.autoDeleteSeconds = patch.autoDeleteSeconds ?? undefined;
@@ -150,6 +155,7 @@ export function installFakeSuperserve(): FakeSuperserve {
     name: r.name,
     status: r.status,
     metadata: r.metadata,
+    ...(r.network ? { network: r.network } : {}),
     vcpuCount: 2,
     memoryMib: 2048,
     ...(r.timeoutSeconds !== undefined ? { timeoutSeconds: r.timeoutSeconds } : {}),
@@ -249,6 +255,12 @@ export function installFakeSuperserve(): FakeSuperserve {
     },
     failNextKill: (error) => {
       killFailure = error;
+    },
+    acceptNetworkUpdateWhilePaused: () => {
+      pausedNetworkUpdates = true;
+    },
+    ignoreNetworkUpdateWhilePaused: () => {
+      silentlyIgnorePausedNetwork = true;
     },
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };

@@ -225,8 +225,9 @@ export function sandboxCoreEnv(
     if (sb.image) env.LOCAL_SANDBOX_IMAGE = sb.image;
     return { env, missingSecrets };
   }
-  if (sb.backend === "agent37" || sb.backend === "superserve") {
-    env.SANDBOX_BACKEND = sb.backend;
+  const backend = effectiveSandboxBackend(config);
+  if (backend === "agent37" || backend === "superserve") {
+    env.SANDBOX_BACKEND = backend;
     return { env, missingSecrets };
   }
   for (const [k, v] of Object.entries(sb.env ?? {})) env[`FLY_RESIDENT_ENV_${k}`] = v;
@@ -673,6 +674,11 @@ function validate(raw: unknown, path: string): QmConfig {
     return v;
   });
   const sandbox = validateSandbox(o["sandbox"], path, target);
+  if (env.core?.SANDBOX_BACKEND !== undefined && !env.core.SANDBOX_BACKEND.trim()) {
+    throw new CliError(
+      `${path}: "env.core.SANDBOX_BACKEND" is blank — name the backend core should run, or remove the key; every target forwards env.core verbatim, so a blank value leaves core with no backend`,
+    );
+  }
   if (effectiveSandboxBackend({ env, sandbox }) === "superserve" && !env.core?.SUPERSERVE_TEMPLATE?.trim()) {
     throw new CliError(
       `${path}: the superserve sandbox backend requires env.core.SUPERSERVE_TEMPLATE (the ready qm-agent-<release> template); core refuses to start without it`,

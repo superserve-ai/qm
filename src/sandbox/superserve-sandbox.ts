@@ -165,6 +165,12 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
   const workspaceDirOf = (homeDir: string): string => `${homeDir}/${WORKSPACE_BASENAME}`;
 
   const adoptedNetwork: SuperserveNetwork = network ?? { allowOut: [], denyOut: [] };
+  const normalizedNetwork = (value: SuperserveNetwork | undefined): string =>
+    JSON.stringify([
+      [...(value?.allowOut ?? [])].map((rule) => rule.trim()).sort(),
+      [...(value?.denyOut ?? [])].map((rule) => rule.trim()).sort(),
+    ]);
+  const appliedNetwork = normalizedNetwork(adoptedNetwork);
   const egressTag = createHash("sha256")
     .update(JSON.stringify([[...(adoptedNetwork.allowOut ?? [])].sort(), [...(adoptedNetwork.denyOut ?? [])].sort()]))
     .digest("hex")
@@ -256,14 +262,13 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       reportError("sandbox_template", "template_changed", message, scope);
       throw new SuperserveSandboxGoneError(sandboxId, message);
     }
-    const stale = info.metadata[SUPERSERVE_METADATA.egress] !== egressTag;
+    const stale = normalizedNetwork(info.network) !== appliedNetwork;
     const retire = async (): Promise<never> => {
       await client.kill(sandboxId);
       const message = `sandbox ${sandboxId} was paused under a different egress policy; it was destroyed and the next provision creates a replacement`;
       reportError("sandbox_egress", "policy_changed", message, scope);
       throw new SuperserveSandboxGoneError(sandboxId, message);
     };
-    if (stale && (info.status === "paused" || info.status === "pausing")) await retire();
     try {
       await client.update(sandboxId, {
         timeoutSeconds: Math.max(info.timeoutSeconds ?? 0, idlePauseSec),
@@ -274,6 +279,9 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     } catch (err) {
       if (stale && isConflict(err)) await retire();
       throw err;
+    }
+    if (stale && normalizedNetwork((await client.info(sandboxId, scopeFilter(name))).network) !== appliedNetwork) {
+      await retire();
     }
     return { session: await client.connect(sandboxId), current: true };
   }
@@ -302,8 +310,11 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         if (cached) {
           try {
             const info = await client.info(cached.session.id, scopeFilter(name));
-            cached.current = Number(info.metadata[SUPERSERVE_METADATA.epoch] ?? 0) <= (await configEpoch());
-            return { live: cached, coldStart: false };
+            if (normalizedNetwork(info.network) === appliedNetwork) {
+              cached.current = Number(info.metadata[SUPERSERVE_METADATA.epoch] ?? 0) <= (await configEpoch());
+              return { live: cached, coldStart: false };
+            }
+            dropLive(name, cached.session.id);
           } catch (err) {
             if (!(err instanceof SuperserveSandboxGoneError)) throw err;
             dropLive(name, cached.session.id);
@@ -373,7 +384,16 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       const cached = liveByName.get(name);
       if (cached) {
         try {
-          await client.info(cached.session.id, scopeFilter(name));
+          const info = await client.info(cached.session.id, scopeFilter(name));
+          if (normalizedNetwork(info.network) !== appliedNetwork) {
+            await client.kill(cached.session.id);
+            dropLive(name, cached.session.id);
+            reportError(
+              "sandbox_egress",
+              "policy_changed",
+              `scratch sandbox ${cached.session.id} no longer carried the configured egress policy; it was destroyed and replaced`,
+            );
+          }
         } catch (err) {
           if (!(err instanceof SuperserveSandboxGoneError)) throw err;
           dropLive(name, cached.session.id);

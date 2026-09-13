@@ -1097,6 +1097,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       "SANDBOX_BACKEND=superserve requires SUPERSERVE_TEMPLATE, the ready qm-agent-<release> template that carries the agent toolchain.",
     );
   }
+  const superserveEnabled =
+    env.SANDBOX_BACKEND?.trim() === "superserve" ||
+    Boolean(env.SUPERSERVE_API_KEY?.trim() && env.SUPERSERVE_TEMPLATE?.trim());
+  if (superserveEnabled && env.NODE_ENV === "production" && !env.DATABASE_URL?.trim()) {
+    throw new Error(
+      "the superserve sandbox backend requires DATABASE_URL in production: the config generation and the provisioning lock have to be durable across instances, or a blue-green rollout can destroy a scope's resident disk.",
+    );
+  }
   const porterSandboxSelected = env.SANDBOX_BACKEND === "porter";
   if (porterSandboxSelected && !env.PORTER_SANDBOX_EGRESS_PROXY_URL) {
     console.warn(

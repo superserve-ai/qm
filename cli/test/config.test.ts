@@ -946,8 +946,27 @@ test("env.core.SANDBOX_BACKEND decides the effective backend, because every targ
     assert.throws(() => loadConfigAt(path), /superserve sandbox backend requires env.core.SUPERSERVE_TEMPLATE/);
   });
   withConfig({ sandbox: { backend: "superserve" }, env: { core: { SANDBOX_BACKEND: "   " } } }, ({ path }) => {
-    assert.throws(() => loadConfigAt(path), /superserve sandbox backend requires env.core.SUPERSERVE_TEMPLATE/);
+    assert.throws(
+      () => loadConfigAt(path),
+      /"env.core.SANDBOX_BACKEND" is blank/,
+      "a blank override is refused rather than rendered over the sandbox block",
+    );
   });
+  withConfig(
+    {
+      target: "fly",
+      sandbox: { backend: "sprites", app: "acme-sandboxes", secretEnv: ["COMPANY_API_TOKEN"] },
+      env: { core: { SANDBOX_BACKEND: "superserve", SUPERSERVE_TEMPLATE: "qm-agent-1.0.0" } },
+    },
+    ({ path }) => {
+      const { config } = loadConfigAt(path);
+      assert.deepEqual(
+        sandboxCoreEnv(config),
+        { env: { SANDBOX_BACKEND: "superserve" }, missingSecrets: [] },
+        "the overridden backend's settings are not demanded or injected",
+      );
+    },
+  );
   withConfig(
     {
       sandbox: { backend: "local" },
@@ -978,6 +997,18 @@ test("env.core.SANDBOX_BACKEND decides the effective backend, because every targ
       );
     },
   );
+});
+
+test("sandbox.backend alone makes the backend's credential a required secret on every target", () => {
+  for (const target of ["docker", "fly"] as const) {
+    withConfig(
+      { target, sandbox: { backend: "superserve" }, env: { core: { SUPERSERVE_TEMPLATE: "qm-agent-1.0.0" } } },
+      ({ path }) => {
+        const secret = computedSecrets(loadConfigAt(path).config).find((s) => s.name === "SUPERSERVE_API_KEY");
+        assert.ok(secret?.required, `${target} requires the key without duplicating SANDBOX_BACKEND under env.core`);
+      },
+    );
+  }
 });
 
 test("aws target makes the sandbox substrate explicit: backend required with a sandbox block, aws forbids fly sandbox settings", () => {

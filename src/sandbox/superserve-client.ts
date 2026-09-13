@@ -68,7 +68,7 @@ export interface SuperserveClient {
   create(opts: SuperserveCreateOptions): Promise<SuperserveSession>;
   connect(sandboxId: string): Promise<SuperserveSession>;
   update(sandboxId: string, patch: SuperserveUpdate): Promise<void>;
-  info(sandboxId: string): Promise<SuperserveSandboxInfo>;
+  info(sandboxId: string, scopeMetadata?: Record<string, string>): Promise<SuperserveSandboxInfo>;
   list(metadata: Record<string, string>): Promise<SuperserveSandboxSummary[]>;
   kill(sandboxId: string): Promise<void>;
 }
@@ -82,6 +82,14 @@ export interface SdkSuperserveClientOptions {
 
 const DEFAULT_MAX_COMMAND_MS = 3600_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+
+const clampUtf8 = (text: string, maxBytes: number): string => {
+  if (maxBytes <= 0) return "";
+  const encoded = Buffer.from(text, "utf8");
+  if (encoded.length <= maxBytes) return text;
+  const kept = encoded.subarray(0, maxBytes).toString("utf8");
+  return kept.endsWith("\uFFFD") ? kept.slice(0, -1) : kept;
+};
 const GONE_STATES: ReadonlySet<string> = new Set(["deleted", "failed"]);
 
 function isGoneError(err: unknown): boolean {
@@ -122,31 +130,39 @@ export function createSdkSuperserveClient(opts: SdkSuperserveClientOptions): Sup
     async run(command, runOpts): Promise<SuperserveCommandResult> {
       const timeoutMs = runOpts?.timeoutMs ?? maxCommandMs;
       const cap = runOpts?.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
-      let stdout = "";
-      let stderr = "";
+      const out = { text: "", bytes: 0 };
+      const err = { text: "", bytes: 0 };
       let truncated = false;
-      const take = (current: string, chunk: string): string => {
-        const room = cap - current.length;
+      const take = (stream: { text: string; bytes: number }, chunk: string): void => {
+        const room = cap - stream.bytes;
         if (room <= 0) {
           truncated = true;
-          return current;
+          return;
         }
-        if (chunk.length > room) truncated = true;
-        return current + chunk.slice(0, room);
+        const chunkBytes = Buffer.byteLength(chunk, "utf8");
+        if (chunkBytes <= room) {
+          stream.text += chunk;
+          stream.bytes += chunkBytes;
+          return;
+        }
+        truncated = true;
+        const kept = clampUtf8(chunk, room);
+        stream.text += kept;
+        stream.bytes += Buffer.byteLength(kept, "utf8");
       };
       try {
         const r = await sbx.commands.run(command, {
           timeoutMs,
           onStdout: (chunk) => {
-            stdout = take(stdout, chunk);
+            take(out, chunk);
           },
           onStderr: (chunk) => {
-            stderr = take(stderr, chunk);
+            take(err, chunk);
           },
         });
         return {
-          stdout: stdout || (r.stdout ?? "").slice(0, cap),
-          stderr: stderr || (r.stderr ?? "").slice(0, cap),
+          stdout: out.text || clampUtf8(r.stdout ?? "", cap),
+          stderr: err.text || clampUtf8(r.stderr ?? "", cap),
           exitCode: r.exitCode,
           ...(truncated || r.truncated ? { truncated: true } : {}),
         };
@@ -257,10 +273,11 @@ export function createSdkSuperserveClient(opts: SdkSuperserveClientOptions): Sup
         throw err;
       }
     },
-    async info(sandboxId): Promise<SuperserveSandboxInfo> {
+    async info(sandboxId, scopeMetadata): Promise<SuperserveSandboxInfo> {
       const { Sandbox } = await loadSdk();
+      const scoped = scopeMetadata && Object.keys(scopeMetadata).length ? scopeMetadata : undefined;
       try {
-        const listed = await Sandbox.list({ ...connection });
+        const listed = await Sandbox.list({ ...connection, ...(scoped ? { metadata: scoped } : {}) });
         const hit = listed.find((s) => s.id === sandboxId);
         if (!hit || GONE_STATES.has(hit.status)) throw new SuperserveSandboxGoneError(sandboxId, "not listed");
         return toInfo(hit);

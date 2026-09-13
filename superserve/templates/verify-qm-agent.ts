@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import { Sandbox } from "@superserve/sdk";
 import { shq } from "../../src/util/shell.ts";
@@ -43,6 +44,7 @@ const VERSION_COMMANDS: Record<string, string> = {
 };
 
 const SANDBOX_TIMEOUT_SECONDS = 300;
+const RELEASE_DEADLINE_MS = 15_000;
 const KEEP_AUTO_DELETE_SECONDS = 3_600;
 const SIGNALS = ["SIGINT", "SIGTERM"] as const;
 const SIGNAL_EXIT_CODES: Record<string, number> = { SIGINT: 130, SIGTERM: 143 };
@@ -103,7 +105,7 @@ async function main(): Promise<void> {
   );
 
   const t0 = Date.now();
-  const sandbox = await Sandbox.create({
+  const creating = Sandbox.create({
     ...conn,
     name: sandboxName,
     fromTemplate: { id: template.id, name: template.name },
@@ -111,21 +113,22 @@ async function main(): Promise<void> {
     timeoutSeconds: SANDBOX_TIMEOUT_SECONDS,
     autoDeleteSeconds: args.keep ? KEEP_AUTO_DELETE_SECONDS : 0,
   });
-  const tCreated = Date.now();
 
   const releaseOnce = async (): Promise<void> => {
+    const created = await creating.catch(() => undefined);
+    if (!created) return;
     if (args.keep) {
       console.log(
-        `[verify] keeping sandbox ${sandbox.id} (--keep; auto-deletes ${KEEP_AUTO_DELETE_SECONDS}s after it pauses)`,
+        `[verify] keeping sandbox ${created.id} (--keep; auto-deletes ${KEEP_AUTO_DELETE_SECONDS}s after it pauses)`,
       );
       return;
     }
     try {
-      await sandbox.kill();
-      console.log(`[verify] killed sandbox ${sandbox.id}`);
+      await created.kill();
+      console.log(`[verify] killed sandbox ${created.id}`);
     } catch (e: unknown) {
-      console.error(
-        `[verify] could not kill sandbox ${sandbox.id}: ${e instanceof Error ? e.message : String(e)}; ` +
+      fail(
+        `could not kill sandbox ${created.id}: ${e instanceof Error ? e.message : String(e)}; ` +
           "it is deleted as soon as it pauses",
       );
     }
@@ -133,10 +136,13 @@ async function main(): Promise<void> {
   let releasing: Promise<void> | undefined;
   const release = (): Promise<void> => (releasing ??= releaseOnce());
   const onSignal = (signal: NodeJS.Signals): void => {
-    console.error(`[verify] ${signal} received; releasing sandbox ${sandbox.id}`);
-    void release().then(() => process.exit(SIGNAL_EXIT_CODES[signal] ?? 1));
+    console.error(`[verify] ${signal} received; releasing sandbox ${sandboxName}`);
+    void Promise.race([release(), sleep(RELEASE_DEADLINE_MS)]).then(() => process.exit(SIGNAL_EXIT_CODES[signal] ?? 1));
   };
   for (const signal of SIGNALS) process.on(signal, onSignal);
+
+  const sandbox = await creating;
+  const tCreated = Date.now();
 
   try {
     const first = await sandbox.commands.run("true", { timeoutMs: 60_000 });

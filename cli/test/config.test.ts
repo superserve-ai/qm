@@ -917,6 +917,22 @@ test("agent37 is a deployment backend on every target and rejects unused Fly set
   });
 });
 
+test("superserve backend requires the agent template in env.core", () => {
+  withConfig({ sandbox: { backend: "superserve" } }, ({ path }) => {
+    assert.throws(() => loadConfigAt(path), /"superserve" requires env.core.SUPERSERVE_TEMPLATE/);
+  });
+  withConfig({ sandbox: { backend: "superserve" }, env: { core: { SUPERSERVE_TEMPLATE: "  " } } }, ({ path }) => {
+    assert.throws(() => loadConfigAt(path), /"superserve" requires env.core.SUPERSERVE_TEMPLATE/);
+  });
+  withConfig(
+    { sandbox: { backend: "superserve" }, env: { core: { SUPERSERVE_TEMPLATE: "qm-agent-1.0.0" } } },
+    ({ path }) => {
+      const { config } = loadConfigAt(path);
+      assert.deepEqual(sandboxCoreEnv(config), { env: { SANDBOX_BACKEND: "superserve" }, missingSecrets: [] });
+    },
+  );
+});
+
 test("aws target makes the sandbox substrate explicit: backend required with a sandbox block, aws forbids fly sandbox settings", () => {
   const aws = {
     accountId: "123456789012",

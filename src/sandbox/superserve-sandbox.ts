@@ -68,7 +68,6 @@ export const SUPERSERVE_METADATA = {
 export interface StoredSuperserveSandbox {
   sandboxId: string;
   createdAtMs: number;
-  homeDir?: string;
 }
 
 export interface SuperserveSandboxOptions extends BlobStagingOptions {
@@ -91,7 +90,6 @@ export interface SuperserveSandboxOptions extends BlobStagingOptions {
 
 interface Live {
   session: SuperserveSession;
-  homeDir: string;
 }
 
 export function createSuperserveSandbox(workspace: WorkspaceStore, opts: SuperserveSandboxOptions): Sandbox {
@@ -137,12 +135,6 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     [SUPERSERVE_METADATA.egress]: egressTag,
   });
 
-  async function detectHome(session: SuperserveSession): Promise<string> {
-    const r = await session.run('printf %s "${HOME:-}"', { timeoutMs: 30_000 });
-    const home = r.exitCode === 0 ? r.stdout.trim() : "";
-    return home.startsWith("/") ? home : configuredHome;
-  }
-
   async function reconnect(scope: string, sandboxId: string): Promise<SuperserveSession> {
     const info = await client.info(sandboxId);
     const stale = info.metadata[SUPERSERVE_METADATA.egress] !== egressTag;
@@ -163,14 +155,9 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     session: SuperserveSession,
     persist?: { scope: string; known?: StoredSuperserveSandbox },
   ): Promise<Live> {
-    const homeDir = persist?.known?.homeDir ?? (await detectHome(session));
-    const live: Live = { session, homeDir };
+    const live: Live = { session };
     if (persist)
-      await store.put(persist.scope, {
-        sandboxId: session.id,
-        createdAtMs: persist.known?.createdAtMs ?? Date.now(),
-        homeDir,
-      });
+      await store.put(persist.scope, { sandboxId: session.id, createdAtMs: persist.known?.createdAtMs ?? Date.now() });
     liveByName.set(name, live);
     return live;
   }
@@ -292,7 +279,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
 
   async function execRaw(name: string, script: string, timeoutSec: number): Promise<ExecResult> {
     return withLive(name, async ({ session }) => {
-      const r = await session.run(spooledScript(script, timeoutSec), {
+      const r = await session.run(spooledScript(`export HOME=${shq(configuredHome)}; ${script}`, timeoutSec), {
         timeoutMs: timeoutSec * 1000 + 30_000,
         maxOutputBytes: OUTPUT_CAP_BYTES,
       });
@@ -403,17 +390,14 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       const scope = writable?.scopeId ?? "default";
       let name: string;
       let coldStart: boolean;
-      let homeDir: string;
       if (scratch) {
         ({ name, coldStart } = await ensureScratch(scratch.key));
-        homeDir = liveByName.get(name)?.homeDir ?? configuredHome;
       } else {
         name = sandboxScopeName(prefix, scope);
         scopeByName.set(name, scope);
-        const ensured = await ensureLive(scope, name, provOpts?.onStatus);
-        coldStart = ensured.coldStart;
-        homeDir = ensured.live.homeDir;
+        coldStart = (await ensureLive(scope, name, provOpts?.onStatus)).coldStart;
       }
+      const homeDir = configuredHome;
       const workspaceDir = workspaceDirOf(homeDir);
 
       const env = Object.fromEntries(Object.entries(provOpts?.env ?? {}).filter(([k]) => !DROPPED_PROXY_ENV.has(k)));

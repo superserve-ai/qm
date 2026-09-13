@@ -69,11 +69,16 @@ export function installFakeSuperserve(): FakeSuperserve {
   };
 
   const remap = (r: FakeRecord, script: string): string =>
-    `export HOME=${JSON.stringify(r.home)}; ` +
-    script.replace(/\btimeout (?:-k \d+ )?\d+ /g, "").replace(/(^|[^A-Za-z0-9._/-])\/tmp\//g, `$1${r.home}/tmp/`);
+    script
+      .replace(/\btimeout (?:-k \d+ )?\d+ /g, "")
+      .replace(/(^|[^A-Za-z0-9._/-])\/tmp\//g, `$1${r.home}/tmp/`)
+      .replace(/(^|[^A-Za-z0-9._/-])\/root(?=\/|$|[^A-Za-z0-9._/-])/g, `$1${r.home}`);
 
-  const hostPath = (r: FakeRecord, absPath: string): string =>
-    absPath.startsWith("/tmp/") ? join(r.home, "tmp", absPath.slice(5)) : absPath;
+  const hostPath = (r: FakeRecord, absPath: string): string => {
+    if (absPath.startsWith("/tmp/")) return join(r.home, "tmp", absPath.slice(5));
+    if (absPath === "/root" || absPath.startsWith("/root/")) return join(r.home, absPath.slice(5));
+    return absPath;
+  };
 
   const session = (r: FakeRecord): SuperserveSession => ({
     id: r.id,

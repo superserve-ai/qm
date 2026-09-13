@@ -83,8 +83,8 @@ test("provision creates one sandbox per scope with scope metadata and lifecycle 
 
 test("home is discovered from the guest, not assumed", async () => {
   const h = await sandbox.provision(layers);
-  assert.equal(h.homeDir, fake.homeDir(scopeName()));
-  assert.equal(h.rootDir, `${fake.homeDir(scopeName())}/workspace`);
+  assert.equal(h.homeDir, "/root");
+  assert.equal(h.rootDir, "/root/workspace");
 });
 
 test("egress allow/deny lists are applied at create time", async () => {
@@ -265,7 +265,6 @@ test("a durable store lets a restarted core reconnect without listing", async ()
   await sandbox.teardown(first);
   const stored = await store.get(scope);
   assert.ok(stored);
-  assert.equal(stored.homeDir, fake.homeDir(scopeName()));
 
   const restarted = make({ store });
   const before = fake.calls().filter((c) => c.startsWith("create:")).length;

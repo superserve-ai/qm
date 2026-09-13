@@ -46,9 +46,11 @@ Web-ui and portal receive an allowlisted subset of the environment (their own `W
 | `ADMIN_ENABLED`       | no       | `0` disables the admin module in web-ui and drops portal's admin upstream. Default `1`.      |
 
 The three port variables must each be a TCP port between 1 and 65535 and must differ from one
-another; `8099` is reserved as well, but only while the embedded broker is running. The
-supervisor rejects anything else at startup with exit code 2 rather than booting into a
-readiness timeout.
+another; `8099` is reserved as well, but only while the embedded broker is running. The two
+millisecond variables must fit a Node timer, and `SHUTDOWN_DRAIN_MS` leaves room for the nine
+seconds the supervisor adds on top so core can finish its own drain backstop and release
+in-flight run leases. The supervisor rejects anything else at startup with exit code 2 rather
+than booting into a readiness timeout or killing core mid-drain.
 
 ### Shared identity and signing secrets
 

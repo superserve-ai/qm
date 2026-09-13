@@ -11,15 +11,18 @@ const env = process.env;
 const MIN_PORT = 1;
 const MAX_PORT = 65535;
 const MAX_TIMER_MS = 2_147_483_647;
+const FAILURE_GRACE_MS = 3_000;
+const DRAIN_BACKSTOP_MS = 5_000;
+const LEASE_RELEASE_MS = 3_000;
+const KILL_MARGIN_MS = 1_000;
+const SHUTDOWN_BACKSTOP_MS = DRAIN_BACKSTOP_MS + LEASE_RELEASE_MS + KILL_MARGIN_MS;
 
 const PUBLIC_PORT = portEnv("PORT", 8080);
 const CORE_PORT = portEnv("QM_CORE_PORT", 8081);
 const WEB_UI_PORT = portEnv("QM_WEB_UI_PORT", 8082);
 const BROKER_PORT = 8099;
 const READY_TIMEOUT_MS = intEnv("QM_READY_TIMEOUT_MS", 120_000, 0, MAX_TIMER_MS);
-const DRAIN_MS = intEnv("SHUTDOWN_DRAIN_MS", 10_000, 0, MAX_TIMER_MS);
-const FAILURE_GRACE_MS = 3_000;
-const DRAIN_BACKSTOP_MS = 5_000;
+const DRAIN_MS = intEnv("SHUTDOWN_DRAIN_MS", 10_000, 0, MAX_TIMER_MS - SHUTDOWN_BACKSTOP_MS);
 
 const CORE_URL = `http://127.0.0.1:${CORE_PORT}`;
 const WEB_UI_URL = `http://127.0.0.1:${WEB_UI_PORT}`;
@@ -300,7 +303,7 @@ function finish() {
 
 function shutdown(signal) {
   log(`${signal} received; draining (SHUTDOWN_DRAIN_MS=${DRAIN_MS})`);
-  terminate(0, DRAIN_MS + DRAIN_BACKSTOP_MS + 1_000, true);
+  terminate(0, DRAIN_MS + SHUTDOWN_BACKSTOP_MS, true);
 }
 
 async function main() {

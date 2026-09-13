@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const ENTRY = join(import.meta.dirname, "../scripts/qm-tenant-entry.mjs");
@@ -49,6 +50,33 @@ test("tenant entry rejects a ready timeout that overflows a node timer", async (
   const { code, stderr } = await runEntry({ QM_READY_TIMEOUT_MS: "2147483648" });
   assert.equal(code, 2);
   assert.match(stderr, /QM_READY_TIMEOUT_MS must be an integer between 0 and 2147483647/);
+});
+
+test("tenant entry rejects a drain window that would overflow the shutdown timer", async () => {
+  const { code, stderr } = await runEntry({ SHUTDOWN_DRAIN_MS: "2147483647" });
+  assert.equal(code, 2);
+  assert.match(stderr, /SHUTDOWN_DRAIN_MS must be an integer between 0 and 2147474647/);
+});
+
+function millis(source: string, pattern: RegExp): number {
+  const raw = pattern.exec(source)?.[1];
+  assert.ok(raw, `no match for ${pattern} in source`);
+  return Number(raw.replaceAll("_", ""));
+}
+
+test("tenant entry waits out core's drain and its lease-release backstop", () => {
+  const entry = readFileSync(ENTRY, "utf8");
+  const core = readFileSync(join(import.meta.dirname, "../src/wiring.ts"), "utf8");
+  assert.match(entry, /terminate\(0, DRAIN_MS \+ SHUTDOWN_BACKSTOP_MS, true\)/);
+  assert.equal(
+    millis(entry, /const DRAIN_BACKSTOP_MS = ([\d_]+);/),
+    millis(core, /\}, shutdownDrainMs \+ ([\d_]+)\);/),
+  );
+  assert.equal(
+    millis(entry, /const LEASE_RELEASE_MS = ([\d_]+);/),
+    millis(core, /releaseInFlightRuns\(\), sleep\(([\d_]+),/),
+  );
+  assert.ok(millis(entry, /const KILL_MARGIN_MS = ([\d_]+);/) > 0);
 });
 
 test("tenant entry accepts the top of the port range", async () => {

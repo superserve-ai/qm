@@ -96,18 +96,24 @@ test("egress allow/deny lists are applied at create time", async () => {
   });
 });
 
-test("adopting an existing sandbox applies the configured egress policy before activating it", async () => {
+test("adopting a paused sandbox resumes it, then applies the egress policy before the first command", async () => {
   sandbox = make();
-  await sandbox.provision(layers);
+  const h = await sandbox.provision(layers);
   assert.equal(fake.current(scopeName())?.network, undefined);
+  await sandbox.teardown(h);
+  assert.equal(fake.current(scopeName())?.status, "paused");
 
   const tightened = make({ egressDeny: ["0.0.0.0/0"], egressAllow: ["api.anthropic.com"] });
   await tightened.provision(layers);
   assert.equal(fake.createdCount(scopeName()), 1);
   assert.deepEqual(fake.current(scopeName())?.network, { allowOut: ["api.anthropic.com"], denyOut: ["0.0.0.0/0"] });
-  const calls = fake.calls();
   const id = fake.current(scopeName())!.id;
-  assert.ok(calls.indexOf(`update:${id}`) < calls.lastIndexOf(`connect:${id}`), "policy applied before activation");
+  const calls = fake.calls();
+  const connectAt = calls.lastIndexOf(`connect:${id}`);
+  const policyAt = calls.indexOf(`update:${id}`, connectAt);
+  const firstRunAt = calls.indexOf(`run:${id}`, connectAt);
+  assert.ok(policyAt > connectAt, "policy applied after the resume");
+  assert.ok(firstRunAt === -1 || policyAt < firstRunAt, "policy applied before the first command");
 
   const relaxed = make({ idlePauseSec: 120, retentionSec: 3600 });
   await relaxed.provision(layers);

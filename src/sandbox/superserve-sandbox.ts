@@ -137,12 +137,12 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
   }
 
   const adoptedNetwork: SuperserveNetwork = network ?? { allowOut: [], denyOut: [] };
-  const reconcileLifecycle = (sandboxId: string): Promise<void> =>
-    client.update(sandboxId, {
-      network: adoptedNetwork,
-      timeoutSeconds: idlePauseSec,
-      autoDeleteSeconds: retentionSec,
-    });
+  async function reconnect(sandboxId: string): Promise<SuperserveSession> {
+    await client.update(sandboxId, { timeoutSeconds: idlePauseSec, autoDeleteSeconds: retentionSec });
+    const session = await client.connect(sandboxId);
+    await session.update({ network: adoptedNetwork });
+    return session;
+  }
 
   async function adopt(name: string, session: SuperserveSession, knownHome?: string): Promise<Live> {
     const homeDir = knownHome ?? (await detectHome(session));
@@ -164,8 +164,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         const stored = await store.get(scope);
         if (stored) {
           try {
-            await reconcileLifecycle(stored.sandboxId);
-            const session = await client.connect(stored.sandboxId);
+            const session = await reconnect(stored.sandboxId);
             const live = await adopt(name, session, stored.homeDir);
             await store.merge(scope, { lifecycle: "running", preservationError: undefined, homeDir: live.homeDir });
             return { live, coldStart: false };
@@ -178,8 +177,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         const listed = await client.list({ [SUPERSERVE_METADATA.scope]: name });
         for (const summary of listed) {
           try {
-            await reconcileLifecycle(summary.id);
-            const session = await client.connect(summary.id);
+            const session = await reconnect(summary.id);
             const live = await adopt(name, session);
             await store.put(scope, {
               sandboxId: session.id,

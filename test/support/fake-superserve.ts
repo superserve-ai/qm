@@ -79,6 +79,7 @@ export function installFakeSuperserve(): FakeSuperserve {
     id: r.id,
     async run(command): Promise<SuperserveCommandResult> {
       alive(r);
+      calls.push(`run:${r.id}`);
       execScripts.push(command);
       mkdirSync(join(r.home, "tmp"), { recursive: true });
       const spawned = spawnSync("sh", ["-c", remap(r, command)], {
@@ -107,6 +108,8 @@ export function installFakeSuperserve(): FakeSuperserve {
     async update(patch: SuperserveUpdate): Promise<void> {
       if (r.expired) gone(r);
       calls.push(`update:${r.id}`);
+      if (patch.network !== undefined && r.status !== "active")
+        throw Object.assign(new Error("Sandbox must be active to update network config"), { statusCode: 409 });
       if (patch.network !== undefined) r.network = patch.network;
       if (patch.metadata !== undefined) r.metadata = { ...r.metadata, ...patch.metadata };
       if (patch.timeoutSeconds !== undefined) r.timeoutSeconds = patch.timeoutSeconds ?? undefined;

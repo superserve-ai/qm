@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { WorkspaceLayer } from "../types.ts";
 import type { WorkspaceStore } from "../workspace/workspace-store.ts";
 import type { DurableMap } from "../persistence/durable-map.ts";
@@ -51,6 +51,7 @@ const RO_LAYERS_MANIFEST = ".ro-layers.manifest";
 const DEFAULT_IDLE_PAUSE_SEC = 15 * 60;
 const DEFAULT_RETENTION_SEC = 30 * 24 * 3600;
 const SCRATCH_IDLE_PAUSE_SEC = 10 * 60;
+const SCRATCH_RETENTION_SEC = 24 * 3600;
 const PREP_TIMEOUT_SEC = 60;
 const TIMEOUT_EXIT_CODE = 124;
 const KILL_AFTER_SEC = 10;
@@ -61,6 +62,7 @@ export const SUPERSERVE_METADATA = {
   scope: "qm_scope",
   prefix: "qm_prefix",
   kind: "qm_kind",
+  egress: "qm_egress",
 } as const;
 
 export interface StoredSuperserveSandbox {
@@ -124,10 +126,17 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
 
   const workspaceDirOf = (homeDir: string): string => `${homeDir}/${WORKSPACE_BASENAME}`;
 
+  const adoptedNetwork: SuperserveNetwork = network ?? { allowOut: [], denyOut: [] };
+  const egressTag = createHash("sha256")
+    .update(JSON.stringify([[...(adoptedNetwork.allowOut ?? [])].sort(), [...(adoptedNetwork.denyOut ?? [])].sort()]))
+    .digest("hex")
+    .slice(0, 16);
+
   const scopeMetadata = (name: string): Record<string, string> => ({
     [SUPERSERVE_METADATA.scope]: name,
     [SUPERSERVE_METADATA.prefix]: prefix,
     [SUPERSERVE_METADATA.kind]: "scope",
+    [SUPERSERVE_METADATA.egress]: egressTag,
   });
 
   async function detectHome(session: SuperserveSession): Promise<string> {
@@ -136,11 +145,18 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     return home.startsWith("/") ? home : configuredHome;
   }
 
-  const adoptedNetwork: SuperserveNetwork = network ?? { allowOut: [], denyOut: [] };
-  async function reconnect(sandboxId: string): Promise<SuperserveSession> {
+  async function reconnect(scope: string, sandboxId: string): Promise<SuperserveSession> {
+    const info = await client.info(sandboxId);
+    const stale = info.metadata[SUPERSERVE_METADATA.egress] !== egressTag;
+    if (stale && (info.status === "paused" || info.status === "pausing")) {
+      await client.kill(sandboxId);
+      const message = `sandbox ${sandboxId} was paused under a different egress policy; it was destroyed and the next provision creates a replacement`;
+      reportError("sandbox_egress", "policy_changed", message, scope);
+      throw new SuperserveSandboxGoneError(sandboxId, message);
+    }
     await client.update(sandboxId, { timeoutSeconds: idlePauseSec, autoDeleteSeconds: retentionSec });
     const session = await client.connect(sandboxId);
-    await session.update({ network: adoptedNetwork });
+    if (stale) await session.update({ network: adoptedNetwork, metadata: { [SUPERSERVE_METADATA.egress]: egressTag } });
     return session;
   }
 
@@ -164,7 +180,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         const stored = await store.get(scope);
         if (stored) {
           try {
-            const session = await reconnect(stored.sandboxId);
+            const session = await reconnect(scope, stored.sandboxId);
             const live = await adopt(name, session, stored.homeDir);
             await store.merge(scope, { lifecycle: "running", preservationError: undefined, homeDir: live.homeDir });
             return { live, coldStart: false };
@@ -177,7 +193,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         const listed = await client.list({ [SUPERSERVE_METADATA.scope]: name });
         for (const summary of listed) {
           try {
-            const session = await reconnect(summary.id);
+            const session = await reconnect(scope, summary.id);
             const live = await adopt(name, session);
             await store.put(scope, {
               sandboxId: session.id,
@@ -222,7 +238,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       metadata: { ...scopeMetadata(name), [SUPERSERVE_METADATA.kind]: "scratch" },
       ...(opts.template ? { template: opts.template } : {}),
       timeoutSeconds: SCRATCH_IDLE_PAUSE_SEC,
-      autoDeleteSeconds: 0,
+      autoDeleteSeconds: SCRATCH_RETENTION_SEC,
       ...(network ? { network } : {}),
     });
     return adopt(name, session);

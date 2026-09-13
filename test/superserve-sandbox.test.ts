@@ -96,24 +96,55 @@ test("egress allow/deny lists are applied at create time", async () => {
   });
 });
 
-test("adopting a paused sandbox resumes it, then applies the egress policy before the first command", async () => {
+test("a paused sandbox is resumed as-is when the egress policy is unchanged", async () => {
+  sandbox = make({ egressDeny: ["0.0.0.0/0"], egressAllow: ["api.anthropic.com"] });
+  const h = await sandbox.provision(layers);
+  await sandbox.teardown(h);
+  const again = make({ egressDeny: ["0.0.0.0/0"], egressAllow: ["api.anthropic.com"] });
+  await again.provision(layers);
+  assert.equal(fake.createdCount(scopeName()), 1);
+  assert.equal(fake.current(scopeName())?.status, "active");
+});
+
+test("a paused sandbox under a different egress policy is destroyed and replaced, never resumed", async () => {
+  const errors: string[] = [];
   sandbox = make();
   const h = await sandbox.provision(layers);
-  assert.equal(fake.current(scopeName())?.network, undefined);
+  await sandbox.writeFile(h, "old.txt", "stale\n");
   await sandbox.teardown(h);
-  assert.equal(fake.current(scopeName())?.status, "paused");
+  const oldId = fake.current(scopeName())!.id;
+
+  const tightened = make({
+    egressDeny: ["0.0.0.0/0"],
+    egressAllow: ["api.anthropic.com"],
+    onError: (e: { category: string; code: string }) => errors.push(`${e.category}:${e.code}`),
+  });
+  const replaced = await tightened.provision(layers);
+  assert.equal(replaced.coldStart, true);
+  assert.equal(fake.createdCount(scopeName()), 2);
+  assert.notEqual(fake.current(scopeName())!.id, oldId);
+  assert.deepEqual(fake.current(scopeName())?.network, { allowOut: ["api.anthropic.com"], denyOut: ["0.0.0.0/0"] });
+  assert.equal(fake.calls().indexOf(`connect:${oldId}`, fake.calls().indexOf(`pause:${oldId}`)), -1, "never resumed");
+  assert.ok(fake.calls().includes(`kill:${oldId}`));
+  assert.deepEqual(errors, ["sandbox_egress:policy_changed"]);
+  assert.equal(await tightened.readFile(replaced, "old.txt"), null);
+});
+
+test("an active sandbox gets a changed egress policy applied before its first command", async () => {
+  sandbox = make();
+  const h = await sandbox.provision(layers);
+  await sandbox.teardown(h, { keepWarm: true });
+  const id = fake.current(scopeName())!.id;
 
   const tightened = make({ egressDeny: ["0.0.0.0/0"], egressAllow: ["api.anthropic.com"] });
   await tightened.provision(layers);
   assert.equal(fake.createdCount(scopeName()), 1);
   assert.deepEqual(fake.current(scopeName())?.network, { allowOut: ["api.anthropic.com"], denyOut: ["0.0.0.0/0"] });
-  const id = fake.current(scopeName())!.id;
   const calls = fake.calls();
   const connectAt = calls.lastIndexOf(`connect:${id}`);
   const policyAt = calls.indexOf(`update:${id}`, connectAt);
   const firstRunAt = calls.indexOf(`run:${id}`, connectAt);
-  assert.ok(policyAt > connectAt, "policy applied after the resume");
-  assert.ok(firstRunAt === -1 || policyAt < firstRunAt, "policy applied before the first command");
+  assert.ok(policyAt > connectAt && policyAt < firstRunAt, "policy applied between adoption and the first command");
 
   const relaxed = make({ idlePauseSec: 120, retentionSec: 3600 });
   await relaxed.provision(layers);
@@ -332,7 +363,7 @@ test("scratch sandboxes are separate, shared while active, and killed on last te
   assert.equal(b.coldStart, false);
   const scratchName = a.id;
   assert.equal(fake.current(scratchName)?.metadata[SUPERSERVE_METADATA.kind], "scratch");
-  assert.equal(fake.current(scratchName)?.autoDeleteSeconds, 0);
+  assert.equal(fake.current(scratchName)?.autoDeleteSeconds, 24 * 3600);
 
   await sandbox.teardown(a);
   assert.ok(fake.current(scratchName), "still alive while another user holds it");

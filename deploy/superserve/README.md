@@ -21,7 +21,7 @@ container port (PORT, default 8080)
 
 Failure and shutdown:
 
-- If any child exits, the supervisor sends `SIGTERM` to the rest, `SIGKILL`s stragglers after 3 s, and exits `1`. Cloud Run restarts the container.
+- If any child exits, the supervisor sends `SIGTERM` to the rest and exits `1`; Cloud Run restarts the container. Stragglers are `SIGKILL`ed after 3 s, or after core's full drain and lease-release window when core is one of them.
 - On `SIGTERM`/`SIGINT` the supervisor signals core first and keeps portal and web-ui serving until core has exited, so in-flight public requests are not reset while runs drain. Core drains workers for `SHUTDOWN_DRAIN_MS` (image default `1000`); if that stop wedges, core's own backstop fires 5 s later and it then spends up to 3 s releasing in-flight run leases. The supervisor waits for that whole sequence plus 1 s before `SIGKILL`, then exits `0`. Keep `SHUTDOWN_DRAIN_MS` at least 9 s under the service's termination grace period so the lease release completes before the platform kills the container; Cloud Run defaults to 10 s, which is why the image ships `1000`.
 - The supervisor logs child lifecycle events only, prefixed `[tenant]`. It never prints environment values.
 

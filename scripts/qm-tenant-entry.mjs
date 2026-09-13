@@ -292,7 +292,7 @@ function terminate(code, graceMs, staged = false) {
 
 function fail(message) {
   warn(message);
-  terminate(1, FAILURE_GRACE_MS);
+  terminate(1, children.has("core") ? DRAIN_MS + SHUTDOWN_BACKSTOP_MS : FAILURE_GRACE_MS);
 }
 
 function finish() {
@@ -312,7 +312,7 @@ async function main() {
     warn(`missing required environment: ${missing.join(", ")}`);
     process.exit(2);
   }
-  if (env.SLACK_EVENTS_MODE === "http") {
+  if (env.SLACK_EVENTS_MODE?.trim() === "http") {
     warn(
       "SLACK_EVENTS_MODE=http is not supported by this image: only portal is public and it does not forward /slack/events; use Slack socket mode",
     );

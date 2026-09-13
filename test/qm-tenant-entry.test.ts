@@ -68,6 +68,7 @@ test("tenant entry waits out core's drain and its lease-release backstop", () =>
   const entry = readFileSync(ENTRY, "utf8");
   const core = readFileSync(join(import.meta.dirname, "../src/wiring.ts"), "utf8");
   assert.match(entry, /terminate\(0, DRAIN_MS \+ SHUTDOWN_BACKSTOP_MS, true\)/);
+  assert.match(entry, /terminate\(1, children\.has\("core"\) \? DRAIN_MS \+ SHUTDOWN_BACKSTOP_MS : FAILURE_GRACE_MS\)/);
   assert.equal(
     millis(entry, /const DRAIN_BACKSTOP_MS = ([\d_]+);/),
     millis(core, /\}, shutdownDrainMs \+ ([\d_]+)\);/),
@@ -130,6 +131,12 @@ test("tenant entry reads a padded AUTH_EMBEDDED as embedded auth", async () => {
   assert.equal(code, 2);
   assert.match(stderr, /and the broker port 8099 must all differ/);
   assert.doesNotMatch(stdout, /embedded auth off/);
+});
+
+test("tenant entry rejects a padded SLACK_EVENTS_MODE=http", async () => {
+  const { code, stderr } = await runEntry({ SLACK_EVENTS_MODE: " http " });
+  assert.equal(code, 2);
+  assert.match(stderr, /SLACK_EVENTS_MODE=http is not supported by this image/);
 });
 
 test("tenant entry rejects colliding service ports", async () => {

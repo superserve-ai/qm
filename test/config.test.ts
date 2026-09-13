@@ -384,6 +384,7 @@ test("SANDBOX_BACKEND: unset defaults to local (dev only); the retired secondary
     /SANDBOX_BACKEND must be set explicitly in production/,
   );
   assert.throws(() => loadConfig({ SANDBOX_BACKEND: "sprites" }), /SPRITES_TOKEN/);
+  assert.throws(() => loadConfig({ SANDBOX_BACKEND: " sprites " }), /SPRITES_TOKEN/);
   assert.throws(() => loadConfig({ SANDBOX_BACKEND: "agent37" }), /AGENT37_API_KEY/);
   assert.equal(loadConfig({ SANDBOX_BACKEND: "agent37", AGENT37_API_KEY: "sk_live_k" }).sandboxBackend, "agent37");
   assert.throws(() => loadConfig({ SANDBOX_BACKEND: "superserve" }), /SUPERSERVE_API_KEY/);
@@ -394,6 +395,10 @@ test("SANDBOX_BACKEND: unset defaults to local (dev only); the retired secondary
   assert.throws(
     () => loadConfig({ SANDBOX_BACKEND: " superserve ", SUPERSERVE_API_KEY: "ss_live_k" }),
     /SUPERSERVE_TEMPLATE/,
+  );
+  assert.throws(
+    () => loadConfig({ SANDBOX_BACKEND: " superserve ", SUPERSERVE_TEMPLATE: "qm-agent-1.0.0" }),
+    /SUPERSERVE_API_KEY/,
   );
   assert.equal(
     loadConfig({

@@ -148,9 +148,12 @@ test("an active sandbox gets a changed egress policy applied before its first co
   assert.deepEqual(fake.current(scopeName())?.network, { allowOut: ["api.anthropic.com"], denyOut: ["0.0.0.0/0"] });
   const calls = fake.calls();
   const connectAt = calls.lastIndexOf(`connect:${id}`);
-  const policyAt = calls.indexOf(`update:${id}`, connectAt);
+  const policyAt = calls.lastIndexOf(`update:${id}`, connectAt);
   const firstRunAt = calls.indexOf(`run:${id}`, connectAt);
-  assert.ok(policyAt > connectAt && policyAt < firstRunAt, "policy applied between adoption and the first command");
+  assert.ok(
+    policyAt >= 0 && policyAt < connectAt && connectAt < firstRunAt,
+    "policy applied before activation and the first command",
+  );
   const meta = fake.current(scopeName())!.metadata;
   assert.equal(meta[SUPERSERVE_METADATA.scope], scopeName());
   assert.equal(meta[SUPERSERVE_METADATA.kind], "scope");
@@ -273,23 +276,52 @@ test("a sandbox built from an older template is replaced on adoption", async () 
 });
 
 test("an older core never reverts a sandbox a newer core already reconfigured", async () => {
-  const older = make({ template: "qm-agent-1.0.0", configEpochMs: 1_000 });
+  const older = make({ template: "qm-agent-1.0.0", configEpochMs: 1_000, idlePauseSec: 600, retentionSec: 3_600 });
   const first = await older.provision(layers);
   await older.teardown(first);
 
-  const newer = make({ template: "qm-agent-1.1.0", configEpochMs: 2_000, egressDeny: ["0.0.0.0/0"] });
+  const newer = make({
+    template: "qm-agent-1.1.0",
+    configEpochMs: 2_000,
+    egressDeny: ["0.0.0.0/0"],
+    idlePauseSec: 1_200,
+    retentionSec: 7_200,
+  });
   await newer.provision(layers);
   assert.equal(fake.createdCount(scopeName()), 2);
   const upgradedId = fake.current(scopeName())!.id;
 
-  const olderAgain = make({ template: "qm-agent-1.0.0", configEpochMs: 1_000 });
+  const olderAgain = make({ template: "qm-agent-1.0.0", configEpochMs: 1_000, idlePauseSec: 600, retentionSec: 3_600 });
   const h = await olderAgain.provision(layers);
   assert.equal(h.coldStart, false);
   assert.equal(fake.createdCount(scopeName()), 2, "no third sandbox");
-  assert.equal(fake.current(scopeName())!.id, upgradedId);
-  assert.equal(fake.current(scopeName())?.metadata[SUPERSERVE_METADATA.template], "qm-agent-1.1.0");
-  assert.deepEqual(fake.current(scopeName())?.network, { denyOut: ["0.0.0.0/0"] });
+  const record = fake.current(scopeName())!;
+  assert.equal(record.id, upgradedId);
+  assert.equal(record.metadata[SUPERSERVE_METADATA.template], "qm-agent-1.1.0");
+  assert.equal(record.metadata[SUPERSERVE_METADATA.epoch], "2000");
+  assert.deepEqual(record.network, { denyOut: ["0.0.0.0/0"] });
+  assert.equal(record.timeoutSeconds, 1_200, "older core leaves the newer idle pause alone");
+  assert.equal(record.autoDeleteSeconds, 7_200, "older core leaves the newer retention alone");
   assert.equal((await olderAgain.run(h, "echo ok")).stdout.trim(), "ok");
+  await olderAgain.teardown(h, { keepWarm: true });
+  assert.equal(fake.current(scopeName())?.timeoutSeconds, 1_200, "older core's teardown does not touch the timeout");
+});
+
+test("a newer core stamps its epoch even when only lifecycle settings changed", async () => {
+  const older = make({ configEpochMs: 1_000, idlePauseSec: 600 });
+  await older.teardown(await older.provision(layers));
+  assert.equal(fake.current(scopeName())?.metadata[SUPERSERVE_METADATA.epoch], "1000");
+
+  const newer = make({ configEpochMs: 2_000, idlePauseSec: 900, retentionSec: 7_200 });
+  await newer.provision(layers);
+  assert.equal(fake.createdCount(scopeName()), 1);
+  assert.equal(fake.current(scopeName())?.metadata[SUPERSERVE_METADATA.epoch], "2000");
+  assert.equal(fake.current(scopeName())?.autoDeleteSeconds, 7_200);
+
+  const olderAgain = make({ configEpochMs: 1_000, idlePauseSec: 600, retentionSec: 3_600 });
+  await olderAgain.teardown(await olderAgain.provision(layers));
+  assert.equal(fake.current(scopeName())?.autoDeleteSeconds, 7_200);
+  assert.equal(fake.current(scopeName())?.timeoutSeconds, 900);
 });
 
 test("a gone sandbox never forgets a replacement another instance already recorded", async () => {

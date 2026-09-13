@@ -95,7 +95,11 @@ export interface SuperserveSandboxOptions extends BlobStagingOptions {
 
 interface Live {
   session: SuperserveSession;
+  current: boolean;
 }
+
+const isConflict = (err: unknown): boolean =>
+  typeof err === "object" && err !== null && (err as { statusCode?: unknown }).statusCode === 409;
 
 export function createSuperserveSandbox(workspace: WorkspaceStore, opts: SuperserveSandboxOptions): Sandbox {
   const client = opts.client;
@@ -153,16 +157,13 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     if (stored?.sandboxId === sandboxId) await store.delete(scope);
   }
 
-  async function reconnect(scope: string, sandboxId: string): Promise<SuperserveSession> {
+  async function reconnect(
+    scope: string,
+    sandboxId: string,
+  ): Promise<{ session: SuperserveSession; current: boolean }> {
     const info = await client.info(sandboxId);
     const stampedEpoch = Number(info.metadata[SUPERSERVE_METADATA.epoch] ?? 0);
-    if (stampedEpoch > configEpochMs) {
-      await client.update(sandboxId, {
-        timeoutSeconds: Math.max(info.timeoutSeconds ?? 0, idlePauseSec),
-        autoDeleteSeconds: retentionSec,
-      });
-      return client.connect(sandboxId);
-    }
+    if (stampedEpoch > configEpochMs) return { session: await client.connect(sandboxId), current: false };
     if (opts.template && info.metadata[SUPERSERVE_METADATA.template] !== opts.template) {
       await client.kill(sandboxId);
       const message = `sandbox ${sandboxId} was built from template ${info.metadata[SUPERSERVE_METADATA.template] ?? "unknown"}, not ${opts.template}; it was destroyed and the next provision creates a replacement`;
@@ -170,26 +171,34 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       throw new SuperserveSandboxGoneError(sandboxId, message);
     }
     const stale = info.metadata[SUPERSERVE_METADATA.egress] !== egressTag;
-    if (stale && (info.status === "paused" || info.status === "pausing")) {
+    const retire = async (): Promise<never> => {
       await client.kill(sandboxId);
       const message = `sandbox ${sandboxId} was paused under a different egress policy; it was destroyed and the next provision creates a replacement`;
       reportError("sandbox_egress", "policy_changed", message, scope);
       throw new SuperserveSandboxGoneError(sandboxId, message);
+    };
+    if (stale && (info.status === "paused" || info.status === "pausing")) await retire();
+    try {
+      await client.update(sandboxId, {
+        timeoutSeconds: Math.max(info.timeoutSeconds ?? 0, idlePauseSec),
+        autoDeleteSeconds: retentionSec,
+        metadata: { ...info.metadata, ...scopeMetadata(info.name) },
+        ...(stale ? { network: adoptedNetwork } : {}),
+      });
+    } catch (err) {
+      if (stale && isConflict(err)) await retire();
+      throw err;
     }
-    const timeoutSeconds = Math.max(info.timeoutSeconds ?? 0, idlePauseSec);
-    await client.update(sandboxId, { timeoutSeconds, autoDeleteSeconds: retentionSec });
-    const session = await client.connect(sandboxId);
-    if (stale)
-      await session.update({ network: adoptedNetwork, metadata: { ...info.metadata, ...scopeMetadata(info.name) } });
-    return session;
+    return { session: await client.connect(sandboxId), current: true };
   }
 
   async function adopt(
     name: string,
     session: SuperserveSession,
     persist?: { scope: string; known?: StoredSuperserveSandbox },
+    current = true,
   ): Promise<Live> {
-    const live: Live = { session };
+    const live: Live = { session, current };
     if (persist)
       await store.put(persist.scope, { sandboxId: session.id, createdAtMs: persist.known?.createdAtMs ?? Date.now() });
     liveByName.set(name, live);
@@ -218,8 +227,8 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         const stored = await store.get(scope);
         if (stored) {
           try {
-            const session = await reconnect(scope, stored.sandboxId);
-            const live = await adopt(name, session, { scope, known: stored });
+            const { session, current } = await reconnect(scope, stored.sandboxId);
+            const live = await adopt(name, session, { scope, known: stored }, current);
             return { live, coldStart: false };
           } catch (err) {
             if (!(err instanceof SuperserveSandboxGoneError)) throw err;
@@ -230,8 +239,8 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         const listed = await client.list({ [SUPERSERVE_METADATA.scope]: name });
         for (const summary of listed) {
           try {
-            const session = await reconnect(scope, summary.id);
-            const live = await adopt(name, session, { scope });
+            const { session, current } = await reconnect(scope, summary.id);
+            const live = await adopt(name, session, { scope }, current);
             return { live, coldStart: false };
           } catch (err) {
             if (!(err instanceof SuperserveSandboxGoneError)) throw err;
@@ -583,7 +592,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
   async function teardownScope(name: string, scope: string, tdOpts?: TeardownOptions): Promise<void> {
     if (tdOpts?.destroy) return advisoryLock.withLock(lockKey(scope), () => destroyStoredScope(scope));
     const live = liveByName.get(name);
-    if (!live) return;
+    if (!live?.current) return;
     try {
       await live.session.update({ timeoutSeconds: tdOpts?.keepWarm ? keepWarmSec : idlePauseSec });
     } catch (err) {

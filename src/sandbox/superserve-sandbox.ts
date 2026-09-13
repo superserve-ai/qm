@@ -244,9 +244,10 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     return provisionQueue(`scratch:${key}`, async () => {
       scratchKeyByName.set(name, key);
       const active = activeScratch.get(name) ?? 0;
-      if (active === 0 && !liveByName.has(name)) await createScratch(name);
+      const coldStart = !liveByName.has(name);
+      if (coldStart) await createScratch(name);
       activeScratch.set(name, active + 1);
-      return { name, coldStart: active === 0 };
+      return { name, coldStart };
     });
   }
 

@@ -394,6 +394,17 @@ test("scratch sandboxes are separate, shared while active, and killed on last te
   assert.equal(fake.current(scopeName()), null, "scratch never touches the scope sandbox");
 });
 
+test("a scratch sandbox lost while handles are active is recreated for the next scratch provision", async () => {
+  const a = await sandbox.provision(layers, { scratch: { key: "job" } });
+  const scratchName = a.id;
+  fake.expire(scratchName);
+  await assert.rejects(sandbox.run(a, "echo x"), /is gone/);
+  const b = await sandbox.provision(layers, { scratch: { key: "job" } });
+  assert.equal(b.coldStart, true);
+  assert.equal(fake.createdCount(scratchName), 2);
+  assert.equal((await sandbox.run(b, "echo back")).stdout.trim(), "back");
+});
+
 test("process sessions run in the background and can be read back", async () => {
   const h = await sandbox.provision(layers);
   assert.ok(supportsProcessSessions(sandbox));

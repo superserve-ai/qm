@@ -22,7 +22,7 @@ container port (PORT, default 8080)
 Failure and shutdown:
 
 - If any child exits, the supervisor sends `SIGTERM` to the rest, `SIGKILL`s stragglers after 3 s, and exits `1`. Cloud Run restarts the container.
-- On `SIGTERM`/`SIGINT` the supervisor signals core first and keeps portal and web-ui serving until core has exited, so in-flight public requests are not reset while runs drain. Core drains for `SHUTDOWN_DRAIN_MS` (image default `4000`) plus its own 5 s backstop; the supervisor waits that long plus 1 s before `SIGKILL`, then exits `0`. Keep `SHUTDOWN_DRAIN_MS` at least 6 s under the service's termination grace period (Cloud Run defaults to 10 s).
+- On `SIGTERM`/`SIGINT` the supervisor signals core first and keeps portal and web-ui serving until core has exited, so in-flight public requests are not reset while runs drain. Core drains workers for `SHUTDOWN_DRAIN_MS` (image default `1000`); if that stop wedges, core's own backstop fires 5 s later and it then spends up to 3 s releasing in-flight run leases. The supervisor waits for that whole sequence plus 1 s before `SIGKILL`, then exits `0`. Keep `SHUTDOWN_DRAIN_MS` at least 9 s under the service's termination grace period so the lease release completes before the platform kills the container; Cloud Run defaults to 10 s, which is why the image ships `1000`.
 - The supervisor logs child lifecycle events only, prefixed `[tenant]`. It never prints environment values.
 
 Core and web-ui do not read a bind address from their environment (`server.listen(PORT)` in `src/index.ts` and `plugins/web-ui/server/index.ts`), so the supervisor preloads `scripts/qm-tenant-loopback.mjs` into those two children. It rewrites any `listen(port)` without an explicit host to `127.0.0.1`. Portal is started without the shim.
@@ -41,16 +41,16 @@ Web-ui and portal receive an allowlisted subset of the environment (their own `W
 | `QM_CORE_PORT`        | no       | Loopback port for core. Default `8081`.                                                      |
 | `QM_WEB_UI_PORT`      | no       | Loopback port for web-ui. Default `8082`.                                                    |
 | `QM_READY_TIMEOUT_MS` | no       | Per-service readiness deadline. Default `120000`.                                            |
-| `SHUTDOWN_DRAIN_MS`   | no       | Core's drain window on SIGTERM. Image default `4000`; QM's own default is `10000`.           |
+| `SHUTDOWN_DRAIN_MS`   | no       | Core's worker drain window on SIGTERM. Image default `1000`; QM's own default is `10000`.    |
 | `AUTH_EMBEDDED`       | no       | `1`/`0` forces the embedded sign-in broker on/off. Unset: on when `AUTH_SIGNING_JWK` is set. |
-| `ADMIN_ENABLED`       | no       | `0` disables the admin module in web-ui and drops portal's admin upstream. Default `1`.      |
+| `ADMIN_ENABLED`       | no       | `0` turns the admin module off in web-ui and stops portal being pointed at it. Default `1`.  |
 
 The three port variables must each be a TCP port between 1 and 65535 and must differ from one
 another; `8099` is reserved as well, but only while the embedded broker is running. The two
 millisecond variables must fit a Node timer, and `SHUTDOWN_DRAIN_MS` leaves room for the nine
-seconds the supervisor adds on top so core can finish its own drain backstop and release
-in-flight run leases. The supervisor rejects anything else at startup with exit code 2 rather
-than booting into a readiness timeout or killing core mid-drain.
+seconds the supervisor adds on top so core can finish its own backstop and release in-flight
+run leases. The supervisor rejects anything else at startup with exit code 2 rather than
+booting into a readiness timeout or killing core mid-drain.
 
 ### Shared identity and signing secrets
 

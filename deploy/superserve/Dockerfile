@@ -46,7 +46,7 @@ COPY scripts/qm-tenant-entry.mjs scripts/qm-tenant-loopback.mjs ./scripts/
 
 ENV NODE_ENV=production
 ENV DATA_DIR=/data
-ENV SHUTDOWN_DRAIN_MS=4000
+ENV SHUTDOWN_DRAIN_MS=1000
 ARG GIT_SHA=
 ENV GIT_SHA=$GIT_SHA
 RUN mkdir -p /data && chown node:node /data

@@ -79,6 +79,17 @@ test("tenant entry waits out core's drain and its lease-release backstop", () =>
   assert.ok(millis(entry, /const KILL_MARGIN_MS = ([\d_]+);/) > 0);
 });
 
+test("the image's drain default leaves the shutdown sequence inside a 10s termination grace", () => {
+  const entry = readFileSync(ENTRY, "utf8");
+  const dockerfile = readFileSync(join(import.meta.dirname, "../deploy/superserve/Dockerfile"), "utf8");
+  const backstop =
+    millis(entry, /const DRAIN_BACKSTOP_MS = ([\d_]+);/) +
+    millis(entry, /const LEASE_RELEASE_MS = ([\d_]+);/) +
+    millis(entry, /const KILL_MARGIN_MS = ([\d_]+);/);
+  const drain = millis(dockerfile, /ENV SHUTDOWN_DRAIN_MS=([\d_]+)/);
+  assert.ok(drain + backstop <= 10_000, `drain ${drain} + backstop ${backstop} exceeds a 10s grace`);
+});
+
 test("tenant entry accepts the top of the port range", async () => {
   const { code, stdout, stderr } = await runEntry({ PORT: "65535", QM_CORE_PORT: "65534", QM_WEB_UI_PORT: "65533" });
   assert.doesNotMatch(stderr, /must be an integer between/);

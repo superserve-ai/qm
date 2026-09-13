@@ -146,7 +146,8 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     }
     await client.update(sandboxId, { timeoutSeconds: idlePauseSec, autoDeleteSeconds: retentionSec });
     const session = await client.connect(sandboxId);
-    if (stale) await session.update({ network: adoptedNetwork, metadata: { [SUPERSERVE_METADATA.egress]: egressTag } });
+    if (stale)
+      await session.update({ network: adoptedNetwork, metadata: { ...info.metadata, ...scopeMetadata(info.name) } });
     return session;
   }
 

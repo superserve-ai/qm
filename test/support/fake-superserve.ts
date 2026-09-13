@@ -116,7 +116,7 @@ export function installFakeSuperserve(): FakeSuperserve {
       if (patch.network !== undefined && r.status !== "active")
         throw Object.assign(new Error("Sandbox must be active to update network config"), { statusCode: 409 });
       if (patch.network !== undefined) r.network = patch.network;
-      if (patch.metadata !== undefined) r.metadata = { ...r.metadata, ...patch.metadata };
+      if (patch.metadata !== undefined) r.metadata = { ...patch.metadata };
       if (patch.timeoutSeconds !== undefined) r.timeoutSeconds = patch.timeoutSeconds ?? undefined;
       if (patch.autoDeleteSeconds !== undefined) r.autoDeleteSeconds = patch.autoDeleteSeconds ?? undefined;
     },

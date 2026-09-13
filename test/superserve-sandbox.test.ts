@@ -146,6 +146,10 @@ test("an active sandbox gets a changed egress policy applied before its first co
   const policyAt = calls.indexOf(`update:${id}`, connectAt);
   const firstRunAt = calls.indexOf(`run:${id}`, connectAt);
   assert.ok(policyAt > connectAt && policyAt < firstRunAt, "policy applied between adoption and the first command");
+  const meta = fake.current(scopeName())!.metadata;
+  assert.equal(meta[SUPERSERVE_METADATA.scope], scopeName());
+  assert.equal(meta[SUPERSERVE_METADATA.kind], "scope");
+  assert.ok(meta[SUPERSERVE_METADATA.egress]);
 
   const relaxed = make({ idlePauseSec: 120, retentionSec: 3600 });
   await relaxed.provision(layers);

@@ -19,7 +19,7 @@ image) adapted to a Superserve BuildSpec on `ubuntu:24.04`, with the same pinned
 | Agent CLIs | `claude` (`@anthropic-ai/claude-code`) and `codex` (`@openai/codex`), global npm installs pinned to the Dockerfile versions                                                                            |
 | Other CLIs | `gh` (GitHub CLI) and AWS CLI v2, checksum-verified downloads pinned to the Dockerfile versions                                                                                                        |
 | Tools      | `/usr/local/bin/x-api` (copied from `fly/tools/x-api` at build time)                                                                                                                                   |
-| Runtime    | Commands run as `root`; the exec daemon sets `HOME=/home/user` (an existing root-owned dir) and its own `PATH`; default cwd `/root/workspace`                                                          |
+| Runtime    | Commands run as `root`; the exec daemon injects `HOME=/home/user` and its own `PATH`, so the backend exports `HOME=/root` (or `SUPERSERVE_HOME_DIR`) on every command; default cwd `/root/workspace`   |
 
 Default VM shape is 2 vCPU / 2048 MiB memory / 8192 MiB disk (`--vcpu`, `--memory-mib`,
 `--disk-mib` override). Sandboxes inherit the shape from the template.

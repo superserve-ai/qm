@@ -592,6 +592,7 @@ interface SuperserveSandboxEnv {
   egressAllow?: string[];
   egressDeny?: string[];
   defaultTimeoutSec?: number;
+  configGeneration?: number;
 }
 
 const csvList = (value: string | undefined): string[] | undefined => {
@@ -621,6 +622,9 @@ function superserveSandboxEnv(env: NodeJS.ProcessEnv): SuperserveSandboxEnv {
     ...(egressDeny ? { egressDeny } : {}),
     ...(numEnvStrict("SANDBOX_TIMEOUT_SEC", env.SANDBOX_TIMEOUT_SEC) !== undefined
       ? { defaultTimeoutSec: numEnvStrict("SANDBOX_TIMEOUT_SEC", env.SANDBOX_TIMEOUT_SEC) }
+      : {}),
+    ...(numEnvStrict("SUPERSERVE_CONFIG_GENERATION", env.SUPERSERVE_CONFIG_GENERATION) !== undefined
+      ? { configGeneration: numEnvStrict("SUPERSERVE_CONFIG_GENERATION", env.SUPERSERVE_CONFIG_GENERATION) }
       : {}),
   };
 }
@@ -1088,7 +1092,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     );
   }
   const dataDir = resolve(env.DATA_DIR ?? "./data");
-  if (env.SANDBOX_BACKEND === "superserve" && !env.SUPERSERVE_TEMPLATE?.trim()) {
+  if (env.SANDBOX_BACKEND?.trim() === "superserve" && !env.SUPERSERVE_TEMPLATE?.trim()) {
     throw new Error(
       "SANDBOX_BACKEND=superserve requires SUPERSERVE_TEMPLATE, the ready qm-agent-<release> template that carries the agent toolchain.",
     );

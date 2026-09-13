@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import type { WorkspaceLayer } from "../types.ts";
 import type { WorkspaceStore } from "../workspace/workspace-store.ts";
@@ -64,11 +65,42 @@ export const SUPERSERVE_METADATA = {
   prefix: "qm_prefix",
   kind: "qm_kind",
   egress: "qm_egress",
+  template: "qm_template",
+  epoch: "qm_config_epoch",
 } as const;
 
 export interface StoredSuperserveSandbox {
   sandboxId: string;
   createdAtMs: number;
+}
+
+export interface StoredConfigEpoch {
+  generation: number;
+}
+
+const CONFIG_EPOCH_LOCK = "superserve-config-epoch";
+
+export function createConfigEpochResolver(
+  store: DurableMap<StoredConfigEpoch>,
+  generationKey: string,
+  lock: AdvisoryLock = createNoopAdvisoryLock(),
+): () => Promise<number> {
+  let pending: Promise<number> | undefined;
+  const claim = (): Promise<number> =>
+    lock.withLock(CONFIG_EPOCH_LOCK, async () => {
+      const stored = await store.get(generationKey);
+      if (stored) return stored.generation;
+      const generation = (await store.entries()).reduce((high, [, seen]) => Math.max(high, seen.generation), 0) + 1;
+      await store.put(generationKey, { generation });
+      return (await store.get(generationKey))?.generation ?? generation;
+    });
+  return () => {
+    pending ??= claim().catch((err: unknown) => {
+      pending = undefined;
+      throw err;
+    });
+    return pending;
+  };
 }
 
 export interface SuperserveSandboxOptions extends BlobStagingOptions {
@@ -79,6 +111,7 @@ export interface SuperserveSandboxOptions extends BlobStagingOptions {
   homeDir?: string;
   idlePauseSec?: number;
   keepWarmSec?: number;
+  configEpoch?: number | (() => Promise<number>);
   retentionSec?: number;
   egressAllow?: string[];
   egressDeny?: string[];
@@ -92,7 +125,13 @@ export interface SuperserveSandboxOptions extends BlobStagingOptions {
 
 interface Live {
   session: SuperserveSession;
+  current: boolean;
 }
+
+const pinnedSandbox = new AsyncLocalStorage<string>();
+
+const isConflict = (err: unknown): boolean =>
+  typeof err === "object" && err !== null && (err as { statusCode?: unknown }).statusCode === 409;
 
 export function createSuperserveSandbox(workspace: WorkspaceStore, opts: SuperserveSandboxOptions): Sandbox {
   const client = opts.client;
@@ -131,35 +170,121 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     .digest("hex")
     .slice(0, 16);
 
-  const scopeMetadata = (name: string): Record<string, string> => ({
+  const bootEpoch = Date.now();
+  const configEpoch = async (): Promise<number> =>
+    typeof opts.configEpoch === "function" ? opts.configEpoch() : (opts.configEpoch ?? bootEpoch);
+  void configEpoch().catch(swallowAs("superserve-sandbox: claim config generation", undefined));
+  const scopeMetadata = async (name: string): Promise<Record<string, string>> => ({
+    [SUPERSERVE_METADATA.epoch]: String(await configEpoch()),
     [SUPERSERVE_METADATA.scope]: name,
     [SUPERSERVE_METADATA.prefix]: prefix,
     [SUPERSERVE_METADATA.kind]: "scope",
     [SUPERSERVE_METADATA.egress]: egressTag,
+    ...(opts.template ? { [SUPERSERVE_METADATA.template]: opts.template } : {}),
   });
 
-  async function reconnect(scope: string, sandboxId: string): Promise<SuperserveSession> {
-    const info = await client.info(sandboxId);
+  const scopeFilter = (name: string): Record<string, string> => ({ [SUPERSERVE_METADATA.scope]: name });
+
+  const staleHandle = (name: string): Error =>
+    new Error(
+      `superserve sandbox for ${name} was replaced while this handle was held; provision it again before using it`,
+    );
+
+  const handleIsCurrent = (handle: SandboxHandle): boolean => {
+    const live = liveByName.get(handle.id);
+    return !handle.providerSandboxId || !live || live.session.id === handle.providerSandboxId;
+  };
+
+  const assertCurrent = (handle: SandboxHandle): void => {
+    if (!handleIsCurrent(handle)) throw staleHandle(handle.id);
+  };
+
+  const pinnedToHandle = <T>(handle: SandboxHandle, action: () => T): T => {
+    assertCurrent(handle);
+    return handle.providerSandboxId ? pinnedSandbox.run(handle.providerSandboxId, action) : action();
+  };
+
+  const guardHandleOps = <T extends object>(ops: T): T =>
+    Object.fromEntries(
+      Object.entries(ops).map(([key, value]) => [
+        key,
+        typeof value === "function"
+          ? (handle: SandboxHandle, ...args: unknown[]): unknown =>
+              pinnedToHandle(handle, () => (value as (...a: unknown[]) => unknown)(handle, ...args))
+          : value,
+      ]),
+    ) as T;
+
+  const dropLive = (name: string, sandboxId: string): void => {
+    if (liveByName.get(name)?.session.id === sandboxId) liveByName.delete(name);
+  };
+
+  async function ownsGuest(name: string): Promise<boolean> {
+    const live = liveByName.get(name);
+    if (!live) return false;
+    if (!live.current) return false;
+    try {
+      const info = await client.info(live.session.id, scopeFilter(name));
+      live.current = Number(info.metadata[SUPERSERVE_METADATA.epoch] ?? 0) <= (await configEpoch());
+      return live.current;
+    } catch (err) {
+      if (err instanceof SuperserveSandboxGoneError) return false;
+      throw err;
+    }
+  }
+
+  async function forget(scope: string, sandboxId: string): Promise<void> {
+    if (store.deleteIf) {
+      await store.deleteIf(scope, (record) => record.sandboxId === sandboxId);
+      return;
+    }
+    const stored = await store.get(scope);
+    if (stored?.sandboxId === sandboxId) await store.delete(scope);
+  }
+
+  async function reconnect(
+    scope: string,
+    name: string,
+    sandboxId: string,
+  ): Promise<{ session: SuperserveSession; current: boolean }> {
+    const info = await client.info(sandboxId, scopeFilter(name));
+    const stampedEpoch = Number(info.metadata[SUPERSERVE_METADATA.epoch] ?? 0);
+    if (stampedEpoch > (await configEpoch())) return { session: await client.connect(sandboxId), current: false };
+    if (opts.template && info.metadata[SUPERSERVE_METADATA.template] !== opts.template) {
+      await client.kill(sandboxId);
+      const message = `sandbox ${sandboxId} was built from template ${info.metadata[SUPERSERVE_METADATA.template] ?? "unknown"}, not ${opts.template}; it was destroyed and the next provision creates a replacement`;
+      reportError("sandbox_template", "template_changed", message, scope);
+      throw new SuperserveSandboxGoneError(sandboxId, message);
+    }
     const stale = info.metadata[SUPERSERVE_METADATA.egress] !== egressTag;
-    if (stale && (info.status === "paused" || info.status === "pausing")) {
+    const retire = async (): Promise<never> => {
       await client.kill(sandboxId);
       const message = `sandbox ${sandboxId} was paused under a different egress policy; it was destroyed and the next provision creates a replacement`;
       reportError("sandbox_egress", "policy_changed", message, scope);
       throw new SuperserveSandboxGoneError(sandboxId, message);
+    };
+    if (stale && (info.status === "paused" || info.status === "pausing")) await retire();
+    try {
+      await client.update(sandboxId, {
+        timeoutSeconds: Math.max(info.timeoutSeconds ?? 0, idlePauseSec),
+        autoDeleteSeconds: retentionSec,
+        metadata: { ...info.metadata, ...(await scopeMetadata(info.name)) },
+        ...(stale ? { network: adoptedNetwork } : {}),
+      });
+    } catch (err) {
+      if (stale && isConflict(err)) await retire();
+      throw err;
     }
-    await client.update(sandboxId, { timeoutSeconds: idlePauseSec, autoDeleteSeconds: retentionSec });
-    const session = await client.connect(sandboxId);
-    if (stale)
-      await session.update({ network: adoptedNetwork, metadata: { ...info.metadata, ...scopeMetadata(info.name) } });
-    return session;
+    return { session: await client.connect(sandboxId), current: true };
   }
 
   async function adopt(
     name: string,
     session: SuperserveSession,
     persist?: { scope: string; known?: StoredSuperserveSandbox },
+    current = true,
   ): Promise<Live> {
-    const live: Live = { session };
+    const live: Live = { session, current };
     if (persist)
       await store.put(persist.scope, { sandboxId: session.id, createdAtMs: persist.known?.createdAtMs ?? Date.now() });
     liveByName.set(name, live);
@@ -176,32 +301,33 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         const cached = liveByName.get(name);
         if (cached) {
           try {
-            await client.info(cached.session.id);
+            const info = await client.info(cached.session.id, scopeFilter(name));
+            cached.current = Number(info.metadata[SUPERSERVE_METADATA.epoch] ?? 0) <= (await configEpoch());
             return { live: cached, coldStart: false };
           } catch (err) {
             if (!(err instanceof SuperserveSandboxGoneError)) throw err;
-            liveByName.delete(name);
-            await store.delete(scope);
+            dropLive(name, cached.session.id);
+            await forget(scope, cached.session.id);
           }
         }
 
         const stored = await store.get(scope);
         if (stored) {
           try {
-            const session = await reconnect(scope, stored.sandboxId);
-            const live = await adopt(name, session, { scope, known: stored });
+            const { session, current } = await reconnect(scope, name, stored.sandboxId);
+            const live = await adopt(name, session, { scope, known: stored }, current);
             return { live, coldStart: false };
           } catch (err) {
             if (!(err instanceof SuperserveSandboxGoneError)) throw err;
-            await store.delete(scope);
+            await forget(scope, stored.sandboxId);
           }
         }
 
         const listed = await client.list({ [SUPERSERVE_METADATA.scope]: name });
         for (const summary of listed) {
           try {
-            const session = await reconnect(scope, summary.id);
-            const live = await adopt(name, session, { scope });
+            const { session, current } = await reconnect(scope, name, summary.id);
+            const live = await adopt(name, session, { scope }, current);
             return { live, coldStart: false };
           } catch (err) {
             if (!(err instanceof SuperserveSandboxGoneError)) throw err;
@@ -215,7 +341,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         }
         const session = await client.create({
           name,
-          metadata: scopeMetadata(name),
+          metadata: await scopeMetadata(name),
           ...(opts.template ? { template: opts.template } : {}),
           timeoutSeconds: idlePauseSec,
           autoDeleteSeconds: retentionSec,
@@ -230,7 +356,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
   async function createScratch(name: string): Promise<Live> {
     const session = await client.create({
       name,
-      metadata: { ...scopeMetadata(name), [SUPERSERVE_METADATA.kind]: "scratch" },
+      metadata: { ...(await scopeMetadata(name)), [SUPERSERVE_METADATA.kind]: "scratch" },
       ...(opts.template ? { template: opts.template } : {}),
       timeoutSeconds: SCRATCH_IDLE_PAUSE_SEC,
       autoDeleteSeconds: SCRATCH_RETENTION_SEC,
@@ -244,6 +370,15 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     return provisionQueue(`scratch:${key}`, async () => {
       scratchKeyByName.set(name, key);
       const active = activeScratch.get(name) ?? 0;
+      const cached = liveByName.get(name);
+      if (cached) {
+        try {
+          await client.info(cached.session.id, scopeFilter(name));
+        } catch (err) {
+          if (!(err instanceof SuperserveSandboxGoneError)) throw err;
+          dropLive(name, cached.session.id);
+        }
+      }
       const coldStart = !liveByName.has(name);
       if (coldStart) await createScratch(name);
       activeScratch.set(name, active + 1);
@@ -254,13 +389,15 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
   async function withLive<T>(name: string, action: (live: Live) => Promise<T>): Promise<T> {
     const live = liveByName.get(name);
     if (!live) throw new Error(`superserve sandbox for ${name} is gone; provision it again before using this handle`);
+    const pinned = pinnedSandbox.getStore();
+    if (pinned && live.session.id !== pinned) throw staleHandle(name);
     try {
       return await action(live);
     } catch (err) {
       if (!(err instanceof SuperserveSandboxGoneError)) throw err;
-      liveByName.delete(name);
+      dropLive(name, live.session.id);
       const scope = scopeByName.get(name);
-      if (scope !== undefined) await store.delete(scope);
+      if (scope !== undefined) await forget(scope, live.session.id);
       throw new Error(`superserve sandbox for ${name} is gone; the next provision creates a replacement`, {
         cause: err,
       });
@@ -381,122 +518,142 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     },
 
     profile,
-    startProcess: procSessions.startProcess,
-    readProcess: procSessions.readProcess,
-    writeStdin: procSessions.writeStdin,
-    signalProcess: procSessions.signalProcess,
-    listProcesses: procSessions.listProcesses,
-    ...execFileOps,
-    ...blobStaging,
+    ...guardHandleOps({
+      startProcess: procSessions.startProcess,
+      readProcess: procSessions.readProcess,
+      writeStdin: procSessions.writeStdin,
+      signalProcess: procSessions.signalProcess,
+      listProcesses: procSessions.listProcesses,
+    }),
+    ...guardHandleOps(execFileOps),
+    ...(blobStaging ? guardHandleOps(blobStaging) : {}),
 
     async provision(layers: WorkspaceLayer[], provOpts?: ProvisionOptions): Promise<SandboxHandle> {
-      const scratch = provOpts?.scratch;
-      const writable = layers.find((l) => l.mode === "rw") ?? layers[0];
-      const scope = writable?.scopeId ?? "default";
-      let name: string;
-      let coldStart: boolean;
-      if (scratch) {
-        ({ name, coldStart } = await ensureScratch(scratch.key));
-      } else {
-        name = sandboxScopeName(prefix, scope);
-        scopeByName.set(name, scope);
-        coldStart = (await ensureLive(scope, name, provOpts?.onStatus)).coldStart;
-      }
-      const homeDir = configuredHome;
-      const workspaceDir = workspaceDirOf(homeDir);
+      return pinnedSandbox.exit(async () => {
+        const scratch = provOpts?.scratch;
+        const writable = layers.find((l) => l.mode === "rw") ?? layers[0];
+        const scope = writable?.scopeId ?? "default";
+        let name: string;
+        let coldStart: boolean;
+        if (scratch) {
+          ({ name, coldStart } = await ensureScratch(scratch.key));
+        } else {
+          name = sandboxScopeName(prefix, scope);
+          scopeByName.set(name, scope);
+          coldStart = (await ensureLive(scope, name, provOpts?.onStatus)).coldStart;
+        }
+        const homeDir = configuredHome;
+        const workspaceDir = workspaceDirOf(homeDir);
+        const providerSandboxId = liveByName.get(name)?.session.id;
 
-      const env = Object.fromEntries(Object.entries(provOpts?.env ?? {}).filter(([k]) => !DROPPED_PROXY_ENV.has(k)));
-      const handle: SandboxHandle = {
-        id: name,
-        rootDir: workspaceDir,
-        homeDir,
-        coldStart,
-        ...(scratch ? { scratch: true } : {}),
-        ...(Object.keys(env).length ? { env } : {}),
-      };
+        const env = Object.fromEntries(Object.entries(provOpts?.env ?? {}).filter(([k]) => !DROPPED_PROXY_ENV.has(k)));
+        const handle: SandboxHandle = {
+          id: name,
+          rootDir: workspaceDir,
+          homeDir,
+          coldStart,
+          ...(providerSandboxId ? { providerSandboxId } : {}),
+          ...(scratch ? { scratch: true } : {}),
+          ...(Object.keys(env).length ? { env } : {}),
+        };
 
-      try {
-        const credLinks = scratch ? "" : ` && ${ephemeralCredLinkScript(homeDir, opts.credentialPaths ?? [])}`;
-        const prep = await execRaw(name, `mkdir -p ${shq(workspaceDir)}${credLinks}`, PREP_TIMEOUT_SEC);
-        if (prep.code !== 0)
-          throw new Error(`superserve provision prep failed: ${(prep.stderr || prep.stdout).slice(0, 200)}`);
+        const prepare = async (): Promise<SandboxHandle> => {
+          const credLinks = scratch ? "" : ` && ${ephemeralCredLinkScript(homeDir, opts.credentialPaths ?? [])}`;
+          const prep = await execRaw(name, `mkdir -p ${shq(workspaceDir)}${credLinks}`, PREP_TIMEOUT_SEC);
+          if (prep.code !== 0)
+            throw new Error(`superserve provision prep failed: ${(prep.stderr || prep.stdout).slice(0, 200)}`);
 
-        await materializeRoLayers(
-          workspace,
-          layers,
-          handle,
-          {
-            readFile: (h, rel) => sandbox.readFile(h, rel),
-            writeFileBytes: (h, rel, data) => sandbox.writeFileBytes(h, rel, data),
-            exec: (script, t) => execRaw(name, script, t),
-          },
-          { manifest: RO_LAYERS_MANIFEST, tar: RO_LAYERS_TAR, label: "superserve" },
-        );
-        await installLayerTools?.({
-          exec: (script, t) => execRaw(name, script, t),
-          writeAbs: (abs, data) => writeAbsBytes(name, abs, data),
-        });
+          await materializeRoLayers(
+            workspace,
+            layers,
+            handle,
+            {
+              readFile: (h, rel) => sandbox.readFile(h, rel),
+              writeFileBytes: (h, rel, data) => sandbox.writeFileBytes(h, rel, data),
+              exec: (script, t) => execRaw(name, script, t),
+            },
+            { manifest: RO_LAYERS_MANIFEST, tar: RO_LAYERS_TAR, label: "superserve" },
+          );
+          if (installLayerTools) {
+            const install = async (): Promise<void> => {
+              if (!(await ownsGuest(name))) return;
+              await installLayerTools({
+                exec: (script, t) => execRaw(name, script, t),
+                writeAbs: (abs, data) => writeAbsBytes(name, abs, data),
+              });
+            };
+            await (scratch ? install() : advisoryLock.withLock(lockKey(scope), install));
+          }
 
-        return handle;
-      } catch (err) {
-        await sandbox
-          .teardown(handle)
-          .catch(swallowAs("superserve-sandbox: teardown after failed provision", undefined));
-        throw err;
-      }
+          assertCurrent(handle);
+          return handle;
+        };
+
+        try {
+          return providerSandboxId ? await pinnedSandbox.run(providerSandboxId, prepare) : await prepare();
+        } catch (err) {
+          await sandbox
+            .teardown(handle)
+            .catch(swallowAs("superserve-sandbox: teardown after failed provision", undefined));
+          throw err;
+        }
+      });
     },
 
     async run(handle, command, execOpts?: ExecOptions): Promise<ExecResult> {
-      const timeoutSec = execOpts?.timeoutMs ? Math.ceil(execOpts.timeoutMs / 1000) : defaultTimeoutSec;
-      const exports = Object.entries(handle.env ?? {})
-        .map(([k, v]) => `export ${k}=${shq(v)}`)
-        .join("; ");
-      const script = `${nonInteractiveShellPrefix()}${exports ? exports + "; " : ""}cd ${handle.rootDir} 2>/dev/null; ${command}`;
-      const signal = execOpts?.signal;
-      if (!signal) return execRaw(handle.id, script, timeoutSec);
-      const killUid = randomUUID();
-      const fireKill = () => {
-        execRaw(handle.id, killScript(killUid), 15).catch(
-          swallowAs("superserve-sandbox: kill in-flight exec", undefined),
-        );
-      };
-      signal.throwIfAborted();
-      const onAbort = () => fireKill();
-      signal.addEventListener("abort", onAbort, { once: true });
-      try {
-        return await execRaw(handle.id, killableScript(script, killUid), timeoutSec);
-      } finally {
-        signal.removeEventListener("abort", onAbort);
-      }
+      return pinnedToHandle(handle, async () => {
+        const timeoutSec = execOpts?.timeoutMs ? Math.ceil(execOpts.timeoutMs / 1000) : defaultTimeoutSec;
+        const exports = Object.entries(handle.env ?? {})
+          .map(([k, v]) => `export ${k}=${shq(v)}`)
+          .join("; ");
+        const script = `${nonInteractiveShellPrefix()}${exports ? exports + "; " : ""}cd ${shq(handle.rootDir)} 2>/dev/null; ${command}`;
+        const signal = execOpts?.signal;
+        if (!signal) return execRaw(handle.id, script, timeoutSec);
+        const killUid = randomUUID();
+        const fireKill = () => {
+          execRaw(handle.id, killScript(killUid), 15).catch(
+            swallowAs("superserve-sandbox: kill in-flight exec", undefined),
+          );
+        };
+        signal.throwIfAborted();
+        const onAbort = () => fireKill();
+        signal.addEventListener("abort", onAbort, { once: true });
+        try {
+          return await execRaw(handle.id, killableScript(script, killUid), timeoutSec);
+        } finally {
+          signal.removeEventListener("abort", onAbort);
+        }
+      });
     },
 
     async writeFileBytes(handle, relPath, data): Promise<void> {
-      await writeAbsBytes(handle.id, posixJoin(handle.rootDir, relPath), data);
+      await pinnedToHandle(handle, () => writeAbsBytes(handle.id, posixJoin(handle.rootDir, relPath), data));
     },
     async writeFile(handle, relPath, data): Promise<void> {
       await sandbox.writeFileBytes(handle, relPath, Buffer.from(data, "utf8"));
     },
     async readFileBytes(handle, relPath): Promise<Uint8Array | null> {
-      return readAbsBytes(handle.id, posixJoin(handle.rootDir, relPath));
+      return pinnedToHandle(handle, () => readAbsBytes(handle.id, posixJoin(handle.rootDir, relPath)));
     },
     async readFile(handle, relPath): Promise<string | null> {
       const bytes = await sandbox.readFileBytes(handle, relPath);
       return bytes === null ? null : Buffer.from(bytes).toString("utf8");
     },
 
-    exportFiles: execExport.exportFiles,
+    exportFiles: (handle, exportOpts) => pinnedToHandle(handle, () => execExport.exportFiles(handle, exportOpts)),
 
     async computerStatus(scopeId: string): Promise<ComputerStatus> {
       const name = sandboxScopeName(prefix, scopeId);
       const stored = await store.get(scopeId);
       if (!stored) return { machine: "no sandbox provisioned yet", provisioned: false, guestResponsive: false };
-      const machine = `superserve sandbox ${stored.sandboxId}`;
+      const machineOf = (sandboxId: string): string => `superserve sandbox ${sandboxId}`;
       const recovery = { strategy: "provider_pause" as const };
+      let inspectedId = stored.sandboxId;
       try {
-        const info = await client.info(stored.sandboxId);
+        const info = await client.info(stored.sandboxId, scopeFilter(name));
         if (info.status === "paused" || info.status === "pausing")
           return {
-            machine,
+            machine: machineOf(stored.sandboxId),
             listed: info.status,
             lifecycleState: "paused",
             provisioned: true,
@@ -505,24 +662,26 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
           };
         scopeByName.set(name, scopeId);
         const { live } = await ensureLive(scopeId, name);
+        inspectedId = live.session.id;
+        const probed = inspectedId === stored.sandboxId ? info : await client.info(inspectedId, scopeFilter(name));
         const r = await live.session.run("echo responsive", { timeoutMs: 30_000 });
         return {
-          machine,
-          listed: info.status,
+          machine: machineOf(inspectedId),
+          listed: probed.status,
           lifecycleState: "running",
-          recovery: { ...recovery, state: info.status },
+          recovery: { ...recovery, state: probed.status },
           provisioned: true,
           guestResponsive: r.exitCode === 0 && /responsive/.test(r.stdout),
         };
       } catch (e) {
         const gone = e instanceof SuperserveSandboxGoneError;
         if (gone) {
-          liveByName.delete(name);
-          await store.delete(scopeId);
+          dropLive(name, inspectedId);
+          await forget(scopeId, inspectedId);
         }
         return {
           recovery,
-          machine: `${machine} (${errMessage(e).slice(0, 120)})`,
+          machine: `${machineOf(inspectedId)} (${errMessage(e).slice(0, 120)})`,
           provisioned: !gone,
           guestResponsive: false,
         };
@@ -540,27 +699,41 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
           }
           activeScratch.delete(handle.id);
           const live = liveByName.get(handle.id);
-          liveByName.delete(handle.id);
-          if (live) await live.session.kill().catch(swallowAs("superserve-sandbox: scratch kill", undefined));
+          if (!live) return;
+          try {
+            await live.session.kill();
+          } catch (err) {
+            if (tdOpts?.destroy) throw err;
+            swallowAs("superserve-sandbox: scratch kill", undefined)(err);
+          }
+          dropLive(handle.id, live.session.id);
         });
       }
       if (tdOpts?.destroy && !scopeByName.has(handle.id)) return;
       const scope = scopeByName.get(handle.id) ?? "default";
-      return provisionQueue(scope, () => teardownScope(handle.id, scope, tdOpts));
+      return provisionQueue(scope, async () => {
+        if (!tdOpts?.destroy && !handleIsCurrent(handle)) return;
+        await teardownScope(handle.id, scope, tdOpts);
+      });
     },
   };
 
   async function teardownScope(name: string, scope: string, tdOpts?: TeardownOptions): Promise<void> {
     if (tdOpts?.destroy) return advisoryLock.withLock(lockKey(scope), () => destroyStoredScope(scope));
     const live = liveByName.get(name);
-    if (!live) return;
-    try {
-      await live.session.update({ timeoutSeconds: tdOpts?.keepWarm ? keepWarmSec : idlePauseSec });
-    } catch (err) {
-      if (!(err instanceof SuperserveSandboxGoneError)) throw err;
-      liveByName.delete(name);
-      await store.delete(scope);
-    }
+    if (!live?.current) return;
+    return advisoryLock.withLock(lockKey(scope), async () => {
+      try {
+        const info = await client.info(live.session.id, scopeFilter(name));
+        live.current = Number(info.metadata[SUPERSERVE_METADATA.epoch] ?? 0) <= (await configEpoch());
+        if (!live.current) return;
+        await live.session.update({ timeoutSeconds: tdOpts?.keepWarm ? keepWarmSec : idlePauseSec });
+      } catch (err) {
+        if (!(err instanceof SuperserveSandboxGoneError)) throw err;
+        dropLive(name, live.session.id);
+        await forget(scope, live.session.id);
+      }
+    });
   }
 
   return sandbox;

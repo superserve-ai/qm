@@ -53,17 +53,22 @@ export const CORE_SECRET_SPECS: readonly RuntimeSecretSpec[] = [
   { name: "LINEAR_OAUTH_CLIENT_SECRET", requiredWhen: "linear-oauth" },
 ];
 
+const sandboxBackendIs =
+  (backend: string) =>
+  (env: NodeJS.ProcessEnv): boolean =>
+    env.SANDBOX_BACKEND?.trim() === backend;
+
 const GATE_PREDICATES: Readonly<Record<SecretGate, (env: NodeJS.ProcessEnv) => boolean>> = {
   production: (env) => env.NODE_ENV === "production",
   codex: (env) => env.HARNESS?.trim() === "codex" && !env.CODEX_AUTH_FILE?.trim() && !env.CODEX_AUTH_CREDENTIAL?.trim(),
   postgres: (env) => env.SESSION_STORE === "postgres" || env.RUN_STORE === "postgres",
-  sprites: (env) => env.SANDBOX_BACKEND === "sprites",
-  smolmachines: (env) => env.SANDBOX_BACKEND === "smolmachines",
-  e2b: (env) => env.SANDBOX_BACKEND === "e2b",
-  modal: (env) => env.SANDBOX_BACKEND === "modal",
-  porter: (env) => env.SANDBOX_BACKEND === "porter",
-  agent37: (env) => env.SANDBOX_BACKEND === "agent37",
-  superserve: (env) => env.SANDBOX_BACKEND === "superserve",
+  sprites: sandboxBackendIs("sprites"),
+  smolmachines: sandboxBackendIs("smolmachines"),
+  e2b: sandboxBackendIs("e2b"),
+  modal: sandboxBackendIs("modal"),
+  porter: sandboxBackendIs("porter"),
+  agent37: sandboxBackendIs("agent37"),
+  superserve: sandboxBackendIs("superserve"),
   "porter-deploy": (env) => env.DEPLOY_PROVIDER === "porter",
   "fly-deploy": (env) => env.DEPLOY_PROVIDER === "fly",
   "aws-deploy-gate": (env) => Boolean(env.AWS_DEPLOY_APPS_DOMAIN || env.DEPLOY_APPS_DOMAIN),

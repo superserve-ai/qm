@@ -219,6 +219,20 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     if (liveByName.get(name)?.session.id === sandboxId) liveByName.delete(name);
   };
 
+  async function ownsGuest(name: string): Promise<boolean> {
+    const live = liveByName.get(name);
+    if (!live) return false;
+    if (!live.current) return false;
+    try {
+      const info = await client.info(live.session.id, scopeFilter(name));
+      live.current = Number(info.metadata[SUPERSERVE_METADATA.epoch] ?? 0) <= (await configEpoch());
+      return live.current;
+    } catch (err) {
+      if (err instanceof SuperserveSandboxGoneError) return false;
+      throw err;
+    }
+  }
+
   async function forget(scope: string, sandboxId: string): Promise<void> {
     if (store.deleteIf) {
       await store.deleteIf(scope, (record) => record.sandboxId === sandboxId);
@@ -560,10 +574,16 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
             },
             { manifest: RO_LAYERS_MANIFEST, tar: RO_LAYERS_TAR, label: "superserve" },
           );
-          await installLayerTools?.({
-            exec: (script, t) => execRaw(name, script, t),
-            writeAbs: (abs, data) => writeAbsBytes(name, abs, data),
-          });
+          if (installLayerTools) {
+            const install = async (): Promise<void> => {
+              if (!(await ownsGuest(name))) return;
+              await installLayerTools({
+                exec: (script, t) => execRaw(name, script, t),
+                writeAbs: (abs, data) => writeAbsBytes(name, abs, data),
+              });
+            };
+            await (scratch ? install() : advisoryLock.withLock(lockKey(scope), install));
+          }
 
           assertCurrent(handle);
           return handle;
@@ -679,10 +699,14 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
           }
           activeScratch.delete(handle.id);
           const live = liveByName.get(handle.id);
-          if (live) {
-            dropLive(handle.id, live.session.id);
-            await live.session.kill().catch(swallowAs("superserve-sandbox: scratch kill", undefined));
+          if (!live) return;
+          try {
+            await live.session.kill();
+          } catch (err) {
+            if (tdOpts?.destroy) throw err;
+            swallowAs("superserve-sandbox: scratch kill", undefined)(err);
           }
+          dropLive(handle.id, live.session.id);
         });
       }
       if (tdOpts?.destroy && !scopeByName.has(handle.id)) return;

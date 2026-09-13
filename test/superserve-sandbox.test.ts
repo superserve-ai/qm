@@ -324,6 +324,24 @@ test("an older core with a cached session stops configuring once a newer core ta
   assert.equal(fake.current(scopeName())?.timeoutSeconds, 1_800, "cached older core no longer rewrites the timeout");
 });
 
+test("an older core never reinstalls deployment tools over a newer generation's", async () => {
+  let reconciles = 0;
+  const toolFiles = (): { to: string; mode: string; content: string }[] => {
+    reconciles += 1;
+    return [];
+  };
+  const older = make({ configEpoch: 1_000, layerToolFiles: toolFiles });
+  await older.teardown(await older.provision(layers));
+  const reconciledByOwner = reconciles;
+  assert.ok(reconciledByOwner > 0, "the owning generation reconciles its guest tools");
+
+  const newer = make({ configEpoch: 2_000 });
+  await newer.teardown(await newer.provision(layers));
+
+  await older.provision(layers);
+  assert.equal(reconciles, reconciledByOwner, "the older generation leaves the newer one's guest tools alone");
+});
+
 test("a teardown rechecks the sandbox's stamp before it rewrites the lifecycle timeout", async () => {
   const older = make({ configEpoch: 1_000, idlePauseSec: 600 });
   const held = await older.provision(layers);
@@ -624,6 +642,21 @@ test("scratch sandboxes are separate, shared while active, and killed on last te
   await sandbox.teardown(b);
   assert.equal(fake.current(scratchName), null);
   assert.equal(fake.current(scopeName()), null, "scratch never touches the scope sandbox");
+});
+
+test("destroying a scratch sandbox surfaces a failed kill instead of reporting success", async () => {
+  const h = await sandbox.provision(layers, { scratch: { key: "creds" } });
+  fake.failNextKill(new Error("superserve unavailable"));
+  await assert.rejects(sandbox.teardown(h, { destroy: true }), /unavailable/);
+  assert.notEqual(fake.current(h.id), null, "the credential-bearing sandbox is still there to retry");
+  await sandbox.teardown(h, { destroy: true });
+  assert.equal(fake.current(h.id), null);
+});
+
+test("a best-effort scratch teardown still tolerates a failed kill", async () => {
+  const h = await sandbox.provision(layers, { scratch: { key: "job" } });
+  fake.failNextKill(new Error("superserve unavailable"));
+  await sandbox.teardown(h);
 });
 
 test("the last scratch handle to close kills the replacement even when it was provisioned earlier", async () => {

@@ -39,6 +39,7 @@ export interface FakeSuperserve {
   execScripts(): string[];
   calls(): string[];
   failNextList(error: Error): void;
+  failNextKill(error: Error): void;
   beforeNextRun(hook: () => Promise<void>): void;
   cleanup(): void;
 }
@@ -52,6 +53,7 @@ export function installFakeSuperserve(): FakeSuperserve {
   let clock = 0;
   let listFailure: Error | null = null;
   let runHook: (() => Promise<void>) | null = null;
+  let killFailure: Error | null = null;
 
   const byName = (name: string): FakeRecord | undefined => {
     const all = [...records.values()].filter((r) => r.name === name).sort((a, b) => b.createdAt - a.createdAt);
@@ -131,6 +133,11 @@ export function installFakeSuperserve(): FakeSuperserve {
       r.status = "paused";
     },
     async kill(): Promise<void> {
+      if (killFailure) {
+        const failure = killFailure;
+        killFailure = null;
+        throw failure;
+      }
       calls.push(`kill:${r.id}`);
       r.expired = true;
       r.status = "deleted";
@@ -239,6 +246,9 @@ export function installFakeSuperserve(): FakeSuperserve {
     },
     beforeNextRun: (hook) => {
       runHook = hook;
+    },
+    failNextKill: (error) => {
+      killFailure = error;
     },
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };

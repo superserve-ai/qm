@@ -123,6 +123,10 @@ function authEmbedded() {
   return isSet("AUTH_SIGNING_JWK");
 }
 
+function adminEnabled() {
+  return env.ADMIN_ENABLED?.trim() !== "0";
+}
+
 function publicBase() {
   return env.PUBLIC_WEB_URL.trim().replace(/\/$/, "");
 }
@@ -141,9 +145,10 @@ function webUiEnv() {
     CORE_API_URL: CORE_URL,
     CORE_ORG_ID: env.ORG_ID,
     ADMIN_BASE_PATH: "/admin",
+    ADMIN_ENABLED: adminEnabled() ? "1" : "0",
     ...loopbackOptions(out),
   });
-  return withDefaults(out, { WEB_UI_PUBLIC_URL: publicBase(), ADMIN_ENABLED: "1" });
+  return withDefaults(out, { WEB_UI_PUBLIC_URL: publicBase() });
 }
 
 function portalEnv() {
@@ -155,14 +160,14 @@ function portalEnv() {
     CORE_ORG_ID: env.ORG_ID,
     WEB_UI_UPSTREAM: WEB_UI_URL,
   });
-  if (env.ADMIN_ENABLED?.trim() !== "0") out.ADMIN_UPSTREAM = `${WEB_UI_URL}/admin`;
+  if (adminEnabled()) out.ADMIN_UPSTREAM = `${WEB_UI_URL}/admin`;
   const defaults = { PORTAL_PUBLIC_URL: base };
   if (isSet("ORG_BRAND_SELF_LABEL")) defaults.AUTH_BRAND_NAME = env.ORG_BRAND_SELF_LABEL;
   if (authEmbedded()) {
     const issuer = `${base}/idp`;
     const broker = `http://127.0.0.1:${BROKER_PORT}`;
+    out.AUTH_EMBEDDED = "1";
     Object.assign(defaults, {
-      AUTH_EMBEDDED: "1",
       AUTH_BROKER_UPSTREAM: broker,
       AUTH_BROKER_PREFIX: "/idp",
       AUTH_ISSUER: issuer,

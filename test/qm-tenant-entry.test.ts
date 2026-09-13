@@ -81,6 +81,18 @@ test("tenant entry rejects a web-ui port that collides with the broker when embe
   assert.match(stderr, /and the broker port 8099 must all differ/);
 });
 
+test("tenant entry reads a padded AUTH_EMBEDDED as embedded auth", async () => {
+  const { code, stdout, stderr } = await runEntry({
+    PORT: "45080",
+    QM_CORE_PORT: "45081",
+    QM_WEB_UI_PORT: "8099",
+    AUTH_EMBEDDED: " 1 ",
+  });
+  assert.equal(code, 2);
+  assert.match(stderr, /and the broker port 8099 must all differ/);
+  assert.doesNotMatch(stdout, /embedded auth off/);
+});
+
 test("tenant entry rejects colliding service ports", async () => {
   const { code, stderr } = await runEntry({ PORT: "45080", QM_CORE_PORT: "45080", AUTH_EMBEDDED: "0" });
   assert.equal(code, 2);

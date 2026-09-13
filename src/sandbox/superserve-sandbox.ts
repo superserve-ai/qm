@@ -68,8 +68,6 @@ export const SUPERSERVE_METADATA = {
 export interface StoredSuperserveSandbox {
   sandboxId: string;
   createdAtMs: number;
-  lifecycle?: "running" | "paused" | "pause_failed";
-  preservationError?: string;
   homeDir?: string;
 }
 
@@ -175,14 +173,23 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     return provisionQueue(scope, () =>
       advisoryLock.withLock(lockKey(scope), async () => {
         const cached = liveByName.get(name);
-        if (cached) return { live: cached, coldStart: false };
+        if (cached) {
+          try {
+            await client.info(cached.session.id);
+            return { live: cached, coldStart: false };
+          } catch (err) {
+            if (!(err instanceof SuperserveSandboxGoneError)) throw err;
+            liveByName.delete(name);
+            await store.delete(scope);
+          }
+        }
 
         const stored = await store.get(scope);
         if (stored) {
           try {
             const session = await reconnect(scope, stored.sandboxId);
             const live = await adopt(name, session, stored.homeDir);
-            await store.merge(scope, { lifecycle: "running", preservationError: undefined, homeDir: live.homeDir });
+            await store.merge(scope, { homeDir: live.homeDir });
             return { live, coldStart: false };
           } catch (err) {
             if (!(err instanceof SuperserveSandboxGoneError)) throw err;
@@ -198,7 +205,6 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
             await store.put(scope, {
               sandboxId: session.id,
               createdAtMs: Date.now(),
-              lifecycle: "running",
               homeDir: live.homeDir,
             });
             return { live, coldStart: false };
@@ -224,7 +230,6 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         await store.put(scope, {
           sandboxId: session.id,
           createdAtMs: Date.now(),
-          lifecycle: "running",
           homeDir: live.homeDir,
         });
         return { live, coldStart: true };
@@ -260,7 +265,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     const acquire = async (): Promise<Live> =>
       scratchKey !== undefined
         ? (liveByName.get(name) ?? (await createScratch(name)))
-        : (await ensureLive(scopeByName.get(name) ?? "default", name)).live;
+        : (liveByName.get(name) ?? (await ensureLive(scopeByName.get(name) ?? "default", name)).live);
     try {
       return await action(await acquire());
     } catch (err) {
@@ -501,11 +506,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       const stored = await store.get(scopeId);
       if (!stored) return { machine: "no sandbox provisioned yet", provisioned: false, guestResponsive: false };
       const machine = `superserve sandbox ${stored.sandboxId}`;
-      const recovery = {
-        strategy: "provider_pause" as const,
-        state: stored.lifecycle,
-        ...(stored.preservationError ? { error: stored.preservationError } : {}),
-      };
+      const recovery = { strategy: "provider_pause" as const };
       try {
         const info = await client.info(stored.sandboxId);
         if (info.status === "paused" || info.status === "pausing")
@@ -524,7 +525,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
           machine,
           listed: info.status,
           lifecycleState: "running",
-          recovery,
+          recovery: { ...recovery, state: info.status },
           provisioned: true,
           guestResponsive: r.exitCode === 0 && /responsive/.test(r.stdout),
         };
@@ -560,29 +561,12 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       }
       if (tdOpts?.destroy && !scopeByName.has(handle.id)) return;
       const scope = scopeByName.get(handle.id) ?? "default";
-      return provisionQueue(scope, () => teardownScope(handle, scope, tdOpts));
+      return provisionQueue(scope, () => teardownScope(scope, tdOpts));
     },
   };
 
-  async function teardownScope(handle: SandboxHandle, scope: string, tdOpts?: TeardownOptions): Promise<void> {
-    if (tdOpts?.destroy) return advisoryLock.withLock(lockKey(scope), () => destroyStoredScope(scope));
-    const live = liveByName.get(handle.id);
-    if (!live || tdOpts?.keepWarm) return;
-    try {
-      await live.session.pause();
-      await store.merge(scope, { lifecycle: "paused", preservationError: undefined });
-      liveByName.delete(handle.id);
-    } catch (error) {
-      if (error instanceof SuperserveSandboxGoneError) {
-        liveByName.delete(handle.id);
-        await store.delete(scope);
-        reportError("sandbox_preservation", "sandbox_gone", errMessage(error), scope);
-        return;
-      }
-      await store.merge(scope, { lifecycle: "pause_failed", preservationError: errMessage(error) });
-      reportError("sandbox_preservation", "pause_failed", errMessage(error), scope);
-      throw error;
-    }
+  async function teardownScope(scope: string, tdOpts?: TeardownOptions): Promise<void> {
+    if (tdOpts?.destroy) await advisoryLock.withLock(lockKey(scope), () => destroyStoredScope(scope));
   }
 
   return sandbox;

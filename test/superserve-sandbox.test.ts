@@ -112,6 +112,7 @@ test("a paused sandbox under a different egress policy is destroyed and replaced
   const h = await sandbox.provision(layers);
   await sandbox.writeFile(h, "old.txt", "stale\n");
   await sandbox.teardown(h);
+  fake.pause(scopeName());
   const oldId = fake.current(scopeName())!.id;
 
   const tightened = make({
@@ -221,23 +222,28 @@ test("provisioning the same scope twice reuses the sandbox", async () => {
   assert.equal(fake.createdCount(scopeName()), 1);
 });
 
-test("teardown pauses; the next provision resumes the same sandbox with its disk intact", async () => {
+test("teardown leaves the sandbox to the provider's idle pause; a paused sandbox resumes with its disk intact", async () => {
   const h = await sandbox.provision(layers);
   await sandbox.writeFile(h, "keep.txt", "still here\n");
   await sandbox.teardown(h);
-  assert.equal(fake.current(scopeName())?.status, "paused");
+  assert.equal(fake.current(scopeName())?.status, "active");
+  assert.ok(!fake.calls().some((c) => c.startsWith("pause:")));
 
+  fake.pause(scopeName());
   const again = await sandbox.provision(layers);
   assert.equal(again.coldStart, false);
   assert.equal(fake.createdCount(scopeName()), 1);
-  assert.equal(fake.current(scopeName())?.status, "active");
   assert.equal(await sandbox.readFile(again, "keep.txt"), "still here\n");
+  assert.equal(fake.current(scopeName())?.status, "active");
 });
 
-test("keepWarm teardown leaves the sandbox running", async () => {
-  const h = await sandbox.provision(layers);
-  await sandbox.teardown(h, { keepWarm: true });
-  assert.equal(fake.current(scopeName())?.status, "active");
+test("a concurrent handle keeps working after another handle's teardown", async () => {
+  const a = await sandbox.provision(layers);
+  const b = await sandbox.provision(layers);
+  await sandbox.teardown(a);
+  const r = await sandbox.run(b, "echo still-running");
+  assert.equal(r.code, 0);
+  assert.match(r.stdout, /still-running/);
 });
 
 test("a fresh core with an empty store rediscovers the sandbox by scope metadata", async () => {
@@ -259,7 +265,6 @@ test("a durable store lets a restarted core reconnect without listing", async ()
   await sandbox.teardown(first);
   const stored = await store.get(scope);
   assert.ok(stored);
-  assert.equal(stored.lifecycle, "paused");
   assert.equal(stored.homeDir, fake.homeDir(scopeName()));
 
   const restarted = make({ store });
@@ -344,6 +349,7 @@ test("computerStatus reports paused, running, and gone", async () => {
   assert.equal(computerVerdict(running), "ok");
 
   await sandbox.teardown(h);
+  fake.pause(scopeName());
   const paused = await sandbox.computerStatus!(scope);
   assert.equal(paused.lifecycleState, "paused");
   assert.equal(paused.recovery?.strategy, "provider_pause");

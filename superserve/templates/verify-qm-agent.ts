@@ -41,6 +41,11 @@ const VERSION_COMMANDS: Record<string, string> = {
   git: "git --version",
 };
 
+const SANDBOX_TIMEOUT_SECONDS = 300;
+const KEEP_AUTO_DELETE_SECONDS = 3_600;
+const SIGNALS = ["SIGINT", "SIGTERM"] as const;
+const SIGNAL_EXIT_CODES: Record<string, number> = { SIGINT: 130, SIGTERM: 143 };
+
 interface Args {
   template: string;
   keep: boolean;
@@ -106,10 +111,37 @@ async function main(): Promise<void> {
     name: sandboxName,
     fromTemplate: { id: template.id, name: template.name },
     metadata: { qm_kind: "verify", qm_template: args.template },
-    timeoutSeconds: 300,
-    autoDeleteSeconds: 0,
+    timeoutSeconds: SANDBOX_TIMEOUT_SECONDS,
+    autoDeleteSeconds: args.keep ? KEEP_AUTO_DELETE_SECONDS : 0,
   });
   const tCreated = Date.now();
+
+  let released = false;
+  const release = async (): Promise<void> => {
+    if (released) return;
+    released = true;
+    if (args.keep) {
+      console.log(
+        `[verify] keeping sandbox ${sandbox.id} (--keep; auto-deletes ${KEEP_AUTO_DELETE_SECONDS}s after it pauses)`,
+      );
+      return;
+    }
+    try {
+      await sandbox.kill();
+      console.log(`[verify] killed sandbox ${sandbox.id}`);
+    } catch (e: unknown) {
+      console.error(
+        `[verify] could not kill sandbox ${sandbox.id}: ${e instanceof Error ? e.message : String(e)}; ` +
+          "it is deleted as soon as it pauses",
+      );
+    }
+  };
+  const onSignal = (signal: NodeJS.Signals): void => {
+    console.error(`[verify] ${signal} received; releasing sandbox ${sandbox.id}`);
+    void release().then(() => process.exit(SIGNAL_EXIT_CODES[signal] ?? 1));
+  };
+  for (const signal of SIGNALS) process.on(signal, onSignal);
+
   try {
     const first = await sandbox.commands.run("true", { timeoutMs: 60_000 });
     const tFirst = Date.now();
@@ -161,12 +193,8 @@ async function main(): Promise<void> {
     console.log(`pip on PATH: ${pip.stdout.trim()}`);
     if (!pip.stdout.includes("/opt/agent-venv")) fail("pip on PATH is not the /opt/agent-venv pip");
   } finally {
-    if (args.keep) {
-      console.log(`[verify] keeping sandbox ${sandbox.id} (--keep)`);
-    } else {
-      await sandbox.kill();
-      console.log(`[verify] killed sandbox ${sandbox.id}`);
-    }
+    for (const signal of SIGNALS) process.off(signal, onSignal);
+    await release();
   }
 
   if (failures.length) {

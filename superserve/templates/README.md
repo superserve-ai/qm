@@ -40,9 +40,10 @@ Deliberately **not** in the template:
 
 ```sh
 export SUPERSERVE_API_KEY=ss_live_...
-# optional: export SUPERSERVE_BASE_URL=https://api-staging.superserve.ai
 node superserve/templates/qm-agent.ts --release 0.1.0 --wait
 ```
+
+Export `SUPERSERVE_BASE_URL` (or pass `--base-url`) to build against a non-production API.
 
 - `--release` is required and must be the QM release tag the deployment runs (the root
   `package.json` version does not track releases); the template is named `qm-agent-<release>`.

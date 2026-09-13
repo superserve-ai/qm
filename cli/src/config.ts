@@ -206,8 +206,11 @@ export const dockerBasePort = (config: QmConfig): number => envNum("QM_BASE_PORT
 
 export const isDigestPinned = (ref: string): boolean => /@sha256:[0-9a-f]{64}$/.test(ref);
 
+export const effectiveSandboxBackend = (config: Pick<QmConfig, "env" | "sandbox">): string | undefined =>
+  config.env.core?.SANDBOX_BACKEND?.trim() || config.sandbox?.backend;
+
 export const localSandboxActive = (config: QmConfig): boolean =>
-  config.target === "docker" && config.sandbox?.backend === "local";
+  config.target === "docker" && effectiveSandboxBackend(config) === "local";
 
 export function sandboxCoreEnv(
   config: QmConfig,
@@ -670,8 +673,7 @@ function validate(raw: unknown, path: string): QmConfig {
     return v;
   });
   const sandbox = validateSandbox(o["sandbox"], path, target);
-  const effectiveSandboxBackend = sandbox?.backend ?? env.core?.SANDBOX_BACKEND?.trim();
-  if (effectiveSandboxBackend === "superserve" && !env.core?.SUPERSERVE_TEMPLATE?.trim()) {
+  if (effectiveSandboxBackend({ env, sandbox }) === "superserve" && !env.core?.SUPERSERVE_TEMPLATE?.trim()) {
     throw new CliError(
       `${path}: the superserve sandbox backend requires env.core.SUPERSERVE_TEMPLATE (the ready qm-agent-<release> template); core refuses to start without it`,
     );

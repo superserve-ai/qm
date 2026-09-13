@@ -7,8 +7,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CONFIG_FILENAME,
+  effectiveSandboxBackend,
   loadConfigAt,
   loadConfigInDir,
+  localSandboxActive,
   mockHarnessWarning,
   sandboxCoreEnv,
   updateConfigImageOverrides,
@@ -932,6 +934,48 @@ test("superserve backend requires the agent template in env.core", () => {
     ({ path }) => {
       const { config } = loadConfigAt(path);
       assert.deepEqual(sandboxCoreEnv(config), { env: { SANDBOX_BACKEND: "superserve" }, missingSecrets: [] });
+    },
+  );
+});
+
+test("env.core.SANDBOX_BACKEND decides the effective backend, because every target layers env.core over the sandbox block", () => {
+  withConfig({ sandbox: { backend: "local" }, env: { core: { SANDBOX_BACKEND: "superserve" } } }, ({ path }) => {
+    assert.throws(() => loadConfigAt(path), /superserve sandbox backend requires env.core.SUPERSERVE_TEMPLATE/);
+  });
+  withConfig({ sandbox: { backend: "local" }, env: { core: { SANDBOX_BACKEND: " superserve " } } }, ({ path }) => {
+    assert.throws(() => loadConfigAt(path), /superserve sandbox backend requires env.core.SUPERSERVE_TEMPLATE/);
+  });
+  withConfig({ sandbox: { backend: "superserve" }, env: { core: { SANDBOX_BACKEND: "   " } } }, ({ path }) => {
+    assert.throws(() => loadConfigAt(path), /superserve sandbox backend requires env.core.SUPERSERVE_TEMPLATE/);
+  });
+  withConfig(
+    {
+      sandbox: { backend: "local" },
+      env: { core: { SANDBOX_BACKEND: "superserve", SUPERSERVE_TEMPLATE: "qm-agent-1.0.0" } },
+    },
+    ({ path }) => {
+      const { config } = loadConfigAt(path);
+      assert.equal(config.sandbox?.backend, "local");
+      assert.equal(effectiveSandboxBackend(config), "superserve");
+    },
+  );
+  withConfig({ sandbox: { backend: "superserve" }, env: { core: { SANDBOX_BACKEND: "local" } } }, ({ path }) => {
+    const { config } = loadConfigAt(path);
+    assert.equal(effectiveSandboxBackend(config), "local");
+    assert.equal(localSandboxActive(config), true, "docker prepares the local sandbox the override actually runs");
+    assert.equal(sandboxCoreEnv(config).env.SANDBOX_BACKEND, "local");
+  });
+  withConfig(
+    {
+      sandbox: { backend: "local" },
+      env: { core: { SANDBOX_BACKEND: "superserve", SUPERSERVE_TEMPLATE: "qm-agent-1.0.0" } },
+    },
+    ({ path }) => {
+      assert.equal(
+        localSandboxActive(loadConfigAt(path).config),
+        false,
+        "a remote override never mounts the host docker socket",
+      );
     },
   );
 });

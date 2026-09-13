@@ -324,6 +324,19 @@ test("an older core with a cached session stops configuring once a newer core ta
   assert.equal(fake.current(scopeName())?.timeoutSeconds, 1_800, "cached older core no longer rewrites the timeout");
 });
 
+test("a core without a durable generation never outranks one that has one", async () => {
+  const durable = make({ configEpoch: 3, idlePauseSec: 1_800, template: "qm-agent-1.1.0" });
+  await durable.teardown(await durable.provision(layers));
+  const stamped = fake.current(scopeName())!.id;
+
+  const ephemeral = make({ configEpoch: 0, idlePauseSec: 600, template: "qm-agent-1.0.0" });
+  const h = await ephemeral.provision(layers);
+  await ephemeral.teardown(h, { keepWarm: true });
+
+  assert.equal(fake.current(scopeName())?.id, stamped, "it never destroys the durable core's sandbox");
+  assert.equal(fake.current(scopeName())?.timeoutSeconds, 1_800, "and never rewrites its lifecycle");
+});
+
 test("an older core never reinstalls deployment tools over a newer generation's", async () => {
   let reconciles = 0;
   const toolFiles = (): { to: string; mode: string; content: string }[] => {

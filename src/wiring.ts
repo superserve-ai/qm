@@ -902,7 +902,9 @@ export function buildApp(
       .digest("hex")
       .slice(0, 32);
     return createSuperserveSandbox(workspace, {
-      configEpoch: ss.configGeneration ?? createConfigEpochResolver(superserveEpochs, generationKey, advisoryLock),
+      configEpoch:
+        ss.configGeneration ??
+        (pgArtifactMap ? createConfigEpochResolver(superserveEpochs, generationKey, advisoryLock) : 0),
       client: createSdkSuperserveClient({
         apiKey: ss.apiKey,
         ...(ss.baseUrl ? { baseUrl: ss.baseUrl } : {}),

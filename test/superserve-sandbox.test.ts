@@ -392,8 +392,38 @@ test("a command that finds its sandbox gone leaves a replacement provisioned mea
   await assert.rejects(sandbox.run(h, "echo back"), /is gone/);
   const replacement = fake.current(scopeName())!;
   assert.notEqual(replacement.id, lostId);
-  assert.equal((await sandbox.run(h, "echo again")).stdout.trim(), "again", "the replacement stays usable");
   assert.equal((await store.get(scope))?.sandboxId, replacement.id);
+  await assert.rejects(
+    sandbox.run(h, "echo again"),
+    /provision it again/,
+    "the old handle never adopts the replacement",
+  );
+  const fresh = await sandbox.provision(layers);
+  assert.equal(fresh.coldStart, false, "the replacement is still cached for the next provision");
+  assert.equal(fake.current(scopeName())!.id, replacement.id);
+  assert.equal((await sandbox.run(fresh, "echo again")).stdout.trim(), "again");
+});
+
+test("a handle never runs against a replacement another turn is still provisioning", async () => {
+  const store: DurableMap<StoredSuperserveSandbox> = createMemoryMap();
+  sandbox = make({ store });
+  const held = await sandbox.provision(layers);
+  const lostId = fake.current(scopeName())!.id;
+  fake.expire(scopeName());
+
+  let duringPrep: unknown;
+  fake.beforeNextRun(async () => {
+    duringPrep = await sandbox.run(held, "pwd").catch((e: unknown) => e);
+  });
+  const replaced = await sandbox.provision(layers);
+
+  assert.notEqual(fake.current(scopeName())!.id, lostId);
+  assert.ok(duringPrep instanceof Error, "the stale handle is rejected instead of running in an unprepared sandbox");
+  assert.match((duringPrep as Error).message, /provision it again/);
+  assert.match((await sandbox.run(replaced, "pwd")).stdout.trim(), /\/workspace$/, "the fresh handle is prepared");
+  const idleBefore = fake.current(scopeName())?.timeoutSeconds;
+  await sandbox.teardown(held, { keepWarm: true });
+  assert.equal(fake.current(scopeName())?.timeoutSeconds, idleBefore, "a stale teardown leaves the replacement alone");
 });
 
 test("a gone sandbox never forgets a replacement another instance already recorded", async () => {
@@ -564,6 +594,21 @@ test("computerStatus reports paused, running, and gone", async () => {
   assert.equal(computerVerdict(gone), "down");
 });
 
+test("computerStatus reports the sandbox it actually probed after a replacement", async () => {
+  const store: DurableMap<StoredSuperserveSandbox> = createMemoryMap();
+  sandbox = make({ store, template: "qm-agent-1.0.0" });
+  await sandbox.provision(layers);
+  const firstId = fake.current(scopeName())!.id;
+
+  const upgraded = make({ store, template: "qm-agent-1.1.0" });
+  const status = await upgraded.computerStatus!(scope);
+  const replacementId = fake.current(scopeName())!.id;
+
+  assert.notEqual(replacementId, firstId);
+  assert.match(status.machine, new RegExp(replacementId));
+  assert.doesNotMatch(status.machine, new RegExp(firstId), "never reports the sandbox it replaced as responsive");
+});
+
 test("scratch sandboxes are separate, shared while active, and killed on last teardown", async () => {
   const a = await sandbox.provision(layers, { scratch: { key: "k1" } });
   const b = await sandbox.provision(layers, { scratch: { key: "k1" } });
@@ -579,6 +624,23 @@ test("scratch sandboxes are separate, shared while active, and killed on last te
   await sandbox.teardown(b);
   assert.equal(fake.current(scratchName), null);
   assert.equal(fake.current(scopeName()), null, "scratch never touches the scope sandbox");
+});
+
+test("the last scratch handle to close kills the replacement even when it was provisioned earlier", async () => {
+  const first = await sandbox.provision(layers, { scratch: { key: "k1" } });
+  fake.expire(first.id);
+  const replacement = await sandbox.provision(layers, { scratch: { key: "k1" } });
+  assert.equal(
+    replacement.coldStart,
+    true,
+    "a scratch sandbox deleted provider-side is recreated on the next provision",
+  );
+  assert.notEqual(fake.current(first.id), null);
+
+  await sandbox.teardown(replacement);
+  assert.notEqual(fake.current(first.id), null, "still referenced by the older handle");
+  await sandbox.teardown(first);
+  assert.equal(fake.current(first.id), null, "the replacement is killed once nothing references it");
 });
 
 test("a scratch sandbox lost while handles are active is recreated for the next scratch provision", async () => {

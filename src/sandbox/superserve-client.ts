@@ -82,6 +82,14 @@ export interface SdkSuperserveClientOptions {
 
 const DEFAULT_MAX_COMMAND_MS = 3600_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
+
+const clampUtf8 = (text: string, maxBytes: number): string => {
+  if (maxBytes <= 0) return "";
+  const encoded = Buffer.from(text, "utf8");
+  if (encoded.length <= maxBytes) return text;
+  const kept = encoded.subarray(0, maxBytes).toString("utf8");
+  return kept.endsWith("\uFFFD") ? kept.slice(0, -1) : kept;
+};
 const GONE_STATES: ReadonlySet<string> = new Set(["deleted", "failed"]);
 
 function isGoneError(err: unknown): boolean {
@@ -122,31 +130,39 @@ export function createSdkSuperserveClient(opts: SdkSuperserveClientOptions): Sup
     async run(command, runOpts): Promise<SuperserveCommandResult> {
       const timeoutMs = runOpts?.timeoutMs ?? maxCommandMs;
       const cap = runOpts?.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
-      let stdout = "";
-      let stderr = "";
+      const out = { text: "", bytes: 0 };
+      const err = { text: "", bytes: 0 };
       let truncated = false;
-      const take = (current: string, chunk: string): string => {
-        const room = cap - current.length;
+      const take = (stream: { text: string; bytes: number }, chunk: string): void => {
+        const room = cap - stream.bytes;
         if (room <= 0) {
           truncated = true;
-          return current;
+          return;
         }
-        if (chunk.length > room) truncated = true;
-        return current + chunk.slice(0, room);
+        const chunkBytes = Buffer.byteLength(chunk, "utf8");
+        if (chunkBytes <= room) {
+          stream.text += chunk;
+          stream.bytes += chunkBytes;
+          return;
+        }
+        truncated = true;
+        const kept = clampUtf8(chunk, room);
+        stream.text += kept;
+        stream.bytes += Buffer.byteLength(kept, "utf8");
       };
       try {
         const r = await sbx.commands.run(command, {
           timeoutMs,
           onStdout: (chunk) => {
-            stdout = take(stdout, chunk);
+            take(out, chunk);
           },
           onStderr: (chunk) => {
-            stderr = take(stderr, chunk);
+            take(err, chunk);
           },
         });
         return {
-          stdout: stdout || (r.stdout ?? "").slice(0, cap),
-          stderr: stderr || (r.stderr ?? "").slice(0, cap),
+          stdout: out.text || clampUtf8(r.stdout ?? "", cap),
+          stderr: err.text || clampUtf8(r.stderr ?? "", cap),
           exitCode: r.exitCode,
           ...(truncated || r.truncated ? { truncated: true } : {}),
         };

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import type { WorkspaceLayer } from "../types.ts";
 import type { WorkspaceStore } from "../workspace/workspace-store.ts";
@@ -127,6 +128,8 @@ interface Live {
   current: boolean;
 }
 
+const pinnedSandbox = new AsyncLocalStorage<string>();
+
 const isConflict = (err: unknown): boolean =>
   typeof err === "object" && err !== null && (err as { statusCode?: unknown }).statusCode === 409;
 
@@ -181,6 +184,36 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
   });
 
   const scopeFilter = (name: string): Record<string, string> => ({ [SUPERSERVE_METADATA.scope]: name });
+
+  const staleHandle = (name: string): Error =>
+    new Error(
+      `superserve sandbox for ${name} was replaced while this handle was held; provision it again before using it`,
+    );
+
+  const handleIsCurrent = (handle: SandboxHandle): boolean => {
+    const live = liveByName.get(handle.id);
+    return !handle.providerSandboxId || !live || live.session.id === handle.providerSandboxId;
+  };
+
+  const assertCurrent = (handle: SandboxHandle): void => {
+    if (!handleIsCurrent(handle)) throw staleHandle(handle.id);
+  };
+
+  const pinnedToHandle = <T>(handle: SandboxHandle, action: () => T): T => {
+    assertCurrent(handle);
+    return handle.providerSandboxId ? pinnedSandbox.run(handle.providerSandboxId, action) : action();
+  };
+
+  const guardHandleOps = <T extends object>(ops: T): T =>
+    Object.fromEntries(
+      Object.entries(ops).map(([key, value]) => [
+        key,
+        typeof value === "function"
+          ? (handle: SandboxHandle, ...args: unknown[]): unknown =>
+              pinnedToHandle(handle, () => (value as (...a: unknown[]) => unknown)(handle, ...args))
+          : value,
+      ]),
+    ) as T;
 
   const dropLive = (name: string, sandboxId: string): void => {
     if (liveByName.get(name)?.session.id === sandboxId) liveByName.delete(name);
@@ -323,6 +356,15 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     return provisionQueue(`scratch:${key}`, async () => {
       scratchKeyByName.set(name, key);
       const active = activeScratch.get(name) ?? 0;
+      const cached = liveByName.get(name);
+      if (cached) {
+        try {
+          await client.info(cached.session.id, scopeFilter(name));
+        } catch (err) {
+          if (!(err instanceof SuperserveSandboxGoneError)) throw err;
+          dropLive(name, cached.session.id);
+        }
+      }
       const coldStart = !liveByName.has(name);
       if (coldStart) await createScratch(name);
       activeScratch.set(name, active + 1);
@@ -333,6 +375,8 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
   async function withLive<T>(name: string, action: (live: Live) => Promise<T>): Promise<T> {
     const live = liveByName.get(name);
     if (!live) throw new Error(`superserve sandbox for ${name} is gone; provision it again before using this handle`);
+    const pinned = pinnedSandbox.getStore();
+    if (pinned && live.session.id !== pinned) throw staleHandle(name);
     try {
       return await action(live);
     } catch (err) {
@@ -460,123 +504,136 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     },
 
     profile,
-    startProcess: procSessions.startProcess,
-    readProcess: procSessions.readProcess,
-    writeStdin: procSessions.writeStdin,
-    signalProcess: procSessions.signalProcess,
-    listProcesses: procSessions.listProcesses,
-    ...execFileOps,
-    ...blobStaging,
+    ...guardHandleOps({
+      startProcess: procSessions.startProcess,
+      readProcess: procSessions.readProcess,
+      writeStdin: procSessions.writeStdin,
+      signalProcess: procSessions.signalProcess,
+      listProcesses: procSessions.listProcesses,
+    }),
+    ...guardHandleOps(execFileOps),
+    ...(blobStaging ? guardHandleOps(blobStaging) : {}),
 
     async provision(layers: WorkspaceLayer[], provOpts?: ProvisionOptions): Promise<SandboxHandle> {
-      const scratch = provOpts?.scratch;
-      const writable = layers.find((l) => l.mode === "rw") ?? layers[0];
-      const scope = writable?.scopeId ?? "default";
-      let name: string;
-      let coldStart: boolean;
-      if (scratch) {
-        ({ name, coldStart } = await ensureScratch(scratch.key));
-      } else {
-        name = sandboxScopeName(prefix, scope);
-        scopeByName.set(name, scope);
-        coldStart = (await ensureLive(scope, name, provOpts?.onStatus)).coldStart;
-      }
-      const homeDir = configuredHome;
-      const workspaceDir = workspaceDirOf(homeDir);
+      return pinnedSandbox.exit(async () => {
+        const scratch = provOpts?.scratch;
+        const writable = layers.find((l) => l.mode === "rw") ?? layers[0];
+        const scope = writable?.scopeId ?? "default";
+        let name: string;
+        let coldStart: boolean;
+        if (scratch) {
+          ({ name, coldStart } = await ensureScratch(scratch.key));
+        } else {
+          name = sandboxScopeName(prefix, scope);
+          scopeByName.set(name, scope);
+          coldStart = (await ensureLive(scope, name, provOpts?.onStatus)).coldStart;
+        }
+        const homeDir = configuredHome;
+        const workspaceDir = workspaceDirOf(homeDir);
+        const providerSandboxId = liveByName.get(name)?.session.id;
 
-      const env = Object.fromEntries(Object.entries(provOpts?.env ?? {}).filter(([k]) => !DROPPED_PROXY_ENV.has(k)));
-      const handle: SandboxHandle = {
-        id: name,
-        rootDir: workspaceDir,
-        homeDir,
-        coldStart,
-        ...(scratch ? { scratch: true } : {}),
-        ...(Object.keys(env).length ? { env } : {}),
-      };
+        const env = Object.fromEntries(Object.entries(provOpts?.env ?? {}).filter(([k]) => !DROPPED_PROXY_ENV.has(k)));
+        const handle: SandboxHandle = {
+          id: name,
+          rootDir: workspaceDir,
+          homeDir,
+          coldStart,
+          ...(providerSandboxId ? { providerSandboxId } : {}),
+          ...(scratch ? { scratch: true } : {}),
+          ...(Object.keys(env).length ? { env } : {}),
+        };
 
-      try {
-        const credLinks = scratch ? "" : ` && ${ephemeralCredLinkScript(homeDir, opts.credentialPaths ?? [])}`;
-        const prep = await execRaw(name, `mkdir -p ${shq(workspaceDir)}${credLinks}`, PREP_TIMEOUT_SEC);
-        if (prep.code !== 0)
-          throw new Error(`superserve provision prep failed: ${(prep.stderr || prep.stdout).slice(0, 200)}`);
+        const prepare = async (): Promise<SandboxHandle> => {
+          const credLinks = scratch ? "" : ` && ${ephemeralCredLinkScript(homeDir, opts.credentialPaths ?? [])}`;
+          const prep = await execRaw(name, `mkdir -p ${shq(workspaceDir)}${credLinks}`, PREP_TIMEOUT_SEC);
+          if (prep.code !== 0)
+            throw new Error(`superserve provision prep failed: ${(prep.stderr || prep.stdout).slice(0, 200)}`);
 
-        await materializeRoLayers(
-          workspace,
-          layers,
-          handle,
-          {
-            readFile: (h, rel) => sandbox.readFile(h, rel),
-            writeFileBytes: (h, rel, data) => sandbox.writeFileBytes(h, rel, data),
+          await materializeRoLayers(
+            workspace,
+            layers,
+            handle,
+            {
+              readFile: (h, rel) => sandbox.readFile(h, rel),
+              writeFileBytes: (h, rel, data) => sandbox.writeFileBytes(h, rel, data),
+              exec: (script, t) => execRaw(name, script, t),
+            },
+            { manifest: RO_LAYERS_MANIFEST, tar: RO_LAYERS_TAR, label: "superserve" },
+          );
+          await installLayerTools?.({
             exec: (script, t) => execRaw(name, script, t),
-          },
-          { manifest: RO_LAYERS_MANIFEST, tar: RO_LAYERS_TAR, label: "superserve" },
-        );
-        await installLayerTools?.({
-          exec: (script, t) => execRaw(name, script, t),
-          writeAbs: (abs, data) => writeAbsBytes(name, abs, data),
-        });
+            writeAbs: (abs, data) => writeAbsBytes(name, abs, data),
+          });
 
-        return handle;
-      } catch (err) {
-        await sandbox
-          .teardown(handle)
-          .catch(swallowAs("superserve-sandbox: teardown after failed provision", undefined));
-        throw err;
-      }
+          assertCurrent(handle);
+          return handle;
+        };
+
+        try {
+          return providerSandboxId ? await pinnedSandbox.run(providerSandboxId, prepare) : await prepare();
+        } catch (err) {
+          await sandbox
+            .teardown(handle)
+            .catch(swallowAs("superserve-sandbox: teardown after failed provision", undefined));
+          throw err;
+        }
+      });
     },
 
     async run(handle, command, execOpts?: ExecOptions): Promise<ExecResult> {
-      const timeoutSec = execOpts?.timeoutMs ? Math.ceil(execOpts.timeoutMs / 1000) : defaultTimeoutSec;
-      const exports = Object.entries(handle.env ?? {})
-        .map(([k, v]) => `export ${k}=${shq(v)}`)
-        .join("; ");
-      const script = `${nonInteractiveShellPrefix()}${exports ? exports + "; " : ""}cd ${shq(handle.rootDir)} 2>/dev/null; ${command}`;
-      const signal = execOpts?.signal;
-      if (!signal) return execRaw(handle.id, script, timeoutSec);
-      const killUid = randomUUID();
-      const fireKill = () => {
-        execRaw(handle.id, killScript(killUid), 15).catch(
-          swallowAs("superserve-sandbox: kill in-flight exec", undefined),
-        );
-      };
-      signal.throwIfAborted();
-      const onAbort = () => fireKill();
-      signal.addEventListener("abort", onAbort, { once: true });
-      try {
-        return await execRaw(handle.id, killableScript(script, killUid), timeoutSec);
-      } finally {
-        signal.removeEventListener("abort", onAbort);
-      }
+      return pinnedToHandle(handle, async () => {
+        const timeoutSec = execOpts?.timeoutMs ? Math.ceil(execOpts.timeoutMs / 1000) : defaultTimeoutSec;
+        const exports = Object.entries(handle.env ?? {})
+          .map(([k, v]) => `export ${k}=${shq(v)}`)
+          .join("; ");
+        const script = `${nonInteractiveShellPrefix()}${exports ? exports + "; " : ""}cd ${shq(handle.rootDir)} 2>/dev/null; ${command}`;
+        const signal = execOpts?.signal;
+        if (!signal) return execRaw(handle.id, script, timeoutSec);
+        const killUid = randomUUID();
+        const fireKill = () => {
+          execRaw(handle.id, killScript(killUid), 15).catch(
+            swallowAs("superserve-sandbox: kill in-flight exec", undefined),
+          );
+        };
+        signal.throwIfAborted();
+        const onAbort = () => fireKill();
+        signal.addEventListener("abort", onAbort, { once: true });
+        try {
+          return await execRaw(handle.id, killableScript(script, killUid), timeoutSec);
+        } finally {
+          signal.removeEventListener("abort", onAbort);
+        }
+      });
     },
 
     async writeFileBytes(handle, relPath, data): Promise<void> {
-      await writeAbsBytes(handle.id, posixJoin(handle.rootDir, relPath), data);
+      await pinnedToHandle(handle, () => writeAbsBytes(handle.id, posixJoin(handle.rootDir, relPath), data));
     },
     async writeFile(handle, relPath, data): Promise<void> {
       await sandbox.writeFileBytes(handle, relPath, Buffer.from(data, "utf8"));
     },
     async readFileBytes(handle, relPath): Promise<Uint8Array | null> {
-      return readAbsBytes(handle.id, posixJoin(handle.rootDir, relPath));
+      return pinnedToHandle(handle, () => readAbsBytes(handle.id, posixJoin(handle.rootDir, relPath)));
     },
     async readFile(handle, relPath): Promise<string | null> {
       const bytes = await sandbox.readFileBytes(handle, relPath);
       return bytes === null ? null : Buffer.from(bytes).toString("utf8");
     },
 
-    exportFiles: execExport.exportFiles,
+    exportFiles: (handle, exportOpts) => pinnedToHandle(handle, () => execExport.exportFiles(handle, exportOpts)),
 
     async computerStatus(scopeId: string): Promise<ComputerStatus> {
       const name = sandboxScopeName(prefix, scopeId);
       const stored = await store.get(scopeId);
       if (!stored) return { machine: "no sandbox provisioned yet", provisioned: false, guestResponsive: false };
-      const machine = `superserve sandbox ${stored.sandboxId}`;
+      const machineOf = (sandboxId: string): string => `superserve sandbox ${sandboxId}`;
       const recovery = { strategy: "provider_pause" as const };
       let inspectedId = stored.sandboxId;
       try {
         const info = await client.info(stored.sandboxId, scopeFilter(name));
         if (info.status === "paused" || info.status === "pausing")
           return {
-            machine,
+            machine: machineOf(stored.sandboxId),
             listed: info.status,
             lifecycleState: "paused",
             provisioned: true,
@@ -586,12 +643,13 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         scopeByName.set(name, scopeId);
         const { live } = await ensureLive(scopeId, name);
         inspectedId = live.session.id;
+        const probed = inspectedId === stored.sandboxId ? info : await client.info(inspectedId, scopeFilter(name));
         const r = await live.session.run("echo responsive", { timeoutMs: 30_000 });
         return {
-          machine,
-          listed: info.status,
+          machine: machineOf(inspectedId),
+          listed: probed.status,
           lifecycleState: "running",
-          recovery: { ...recovery, state: info.status },
+          recovery: { ...recovery, state: probed.status },
           provisioned: true,
           guestResponsive: r.exitCode === 0 && /responsive/.test(r.stdout),
         };
@@ -603,7 +661,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         }
         return {
           recovery,
-          machine: `${machine} (${errMessage(e).slice(0, 120)})`,
+          machine: `${machineOf(inspectedId)} (${errMessage(e).slice(0, 120)})`,
           provisioned: !gone,
           guestResponsive: false,
         };
@@ -629,7 +687,10 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       }
       if (tdOpts?.destroy && !scopeByName.has(handle.id)) return;
       const scope = scopeByName.get(handle.id) ?? "default";
-      return provisionQueue(scope, () => teardownScope(handle.id, scope, tdOpts));
+      return provisionQueue(scope, async () => {
+        if (!tdOpts?.destroy && !handleIsCurrent(handle)) return;
+        await teardownScope(handle.id, scope, tdOpts);
+      });
     },
   };
 

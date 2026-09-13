@@ -45,6 +45,11 @@ Web-ui and portal receive an allowlisted subset of the environment (their own `W
 | `AUTH_EMBEDDED`       | no       | `1`/`0` forces the embedded sign-in broker on/off. Unset: on when `AUTH_SIGNING_JWK` is set. |
 | `ADMIN_ENABLED`       | no       | `0` disables the admin module in web-ui and drops portal's admin upstream. Default `1`.      |
 
+The three port variables must each be a TCP port between 1 and 65535 and must differ from one
+another; `8099` is reserved as well, but only while the embedded broker is running. The
+supervisor rejects anything else at startup with exit code 2 rather than booting into a
+readiness timeout.
+
 ### Shared identity and signing secrets
 
 | Variable                 | Required | Consumers            | Notes                                                                                         |

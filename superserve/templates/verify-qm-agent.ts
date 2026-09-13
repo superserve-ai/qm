@@ -189,8 +189,8 @@ async function main(): Promise<void> {
     console.log(`pip on PATH: ${pip.stdout.trim()}`);
     if (!pip.stdout.includes("/opt/agent-venv")) fail("pip on PATH is not the /opt/agent-venv pip");
   } finally {
-    for (const signal of SIGNALS) process.off(signal, onSignal);
     await release();
+    for (const signal of SIGNALS) process.off(signal, onSignal);
   }
 
   if (failures.length) {

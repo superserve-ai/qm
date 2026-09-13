@@ -64,6 +64,7 @@ export const SUPERSERVE_METADATA = {
   prefix: "qm_prefix",
   kind: "qm_kind",
   egress: "qm_egress",
+  template: "qm_template",
 } as const;
 
 export interface StoredSuperserveSandbox {
@@ -136,6 +137,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     [SUPERSERVE_METADATA.prefix]: prefix,
     [SUPERSERVE_METADATA.kind]: "scope",
     [SUPERSERVE_METADATA.egress]: egressTag,
+    ...(opts.template ? { [SUPERSERVE_METADATA.template]: opts.template } : {}),
   });
 
   async function forget(scope: string, sandboxId: string): Promise<void> {
@@ -149,6 +151,12 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
 
   async function reconnect(scope: string, sandboxId: string): Promise<SuperserveSession> {
     const info = await client.info(sandboxId);
+    if (opts.template && info.metadata[SUPERSERVE_METADATA.template] !== opts.template) {
+      await client.kill(sandboxId);
+      const message = `sandbox ${sandboxId} was built from template ${info.metadata[SUPERSERVE_METADATA.template] ?? "unknown"}, not ${opts.template}; it was destroyed and the next provision creates a replacement`;
+      reportError("sandbox_template", "template_changed", message, scope);
+      throw new SuperserveSandboxGoneError(sandboxId, message);
+    }
     const stale = info.metadata[SUPERSERVE_METADATA.egress] !== egressTag;
     if (stale && (info.status === "paused" || info.status === "pausing")) {
       await client.kill(sandboxId);

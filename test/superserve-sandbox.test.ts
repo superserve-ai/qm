@@ -247,6 +247,31 @@ test("teardown leaves the sandbox to the provider's idle pause; a paused sandbox
   assert.equal(fake.current(scopeName())?.status, "active");
 });
 
+test("a sandbox built from an older template is replaced on adoption", async () => {
+  const errors: string[] = [];
+  sandbox = make({ template: "qm-agent-1.0.0" });
+  const h = await sandbox.provision(layers);
+  const oldId = fake.current(scopeName())!.id;
+  assert.equal(fake.current(scopeName())?.metadata[SUPERSERVE_METADATA.template], "qm-agent-1.0.0");
+  await sandbox.teardown(h);
+
+  const upgraded = make({
+    template: "qm-agent-1.1.0",
+    onError: (e: { category: string; code: string }) => errors.push(`${e.category}:${e.code}`),
+  });
+  const replaced = await upgraded.provision(layers);
+  assert.equal(replaced.coldStart, true);
+  assert.notEqual(fake.current(scopeName())!.id, oldId);
+  assert.equal(fake.current(scopeName())?.metadata[SUPERSERVE_METADATA.template], "qm-agent-1.1.0");
+  assert.ok(fake.calls().includes(`kill:${oldId}`));
+  assert.deepEqual(errors, ["sandbox_template:template_changed"]);
+
+  const same = make({ template: "qm-agent-1.1.0" });
+  const again = await same.provision(layers);
+  assert.equal(again.coldStart, false);
+  assert.equal(fake.createdCount(scopeName()), 2);
+});
+
 test("a gone sandbox never forgets a replacement another instance already recorded", async () => {
   const store: DurableMap<StoredSuperserveSandbox> = createMemoryMap();
   sandbox = make({ store });

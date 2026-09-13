@@ -73,6 +73,35 @@ export interface StoredSuperserveSandbox {
   createdAtMs: number;
 }
 
+export interface StoredConfigEpoch {
+  generation: number;
+}
+
+const CONFIG_EPOCH_LOCK = "superserve-config-epoch";
+
+export function createConfigEpochResolver(
+  store: DurableMap<StoredConfigEpoch>,
+  generationKey: string,
+  lock: AdvisoryLock = createNoopAdvisoryLock(),
+): () => Promise<number> {
+  let pending: Promise<number> | undefined;
+  const claim = (): Promise<number> =>
+    lock.withLock(CONFIG_EPOCH_LOCK, async () => {
+      const stored = await store.get(generationKey);
+      if (stored) return stored.generation;
+      const generation = (await store.entries()).reduce((high, [, seen]) => Math.max(high, seen.generation), 0) + 1;
+      await store.put(generationKey, { generation });
+      return (await store.get(generationKey))?.generation ?? generation;
+    });
+  return () => {
+    pending ??= claim().catch((err: unknown) => {
+      pending = undefined;
+      throw err;
+    });
+    return pending;
+  };
+}
+
 export interface SuperserveSandboxOptions extends BlobStagingOptions {
   client: SuperserveClient;
   namePrefix?: string;
@@ -81,7 +110,7 @@ export interface SuperserveSandboxOptions extends BlobStagingOptions {
   homeDir?: string;
   idlePauseSec?: number;
   keepWarmSec?: number;
-  configEpochMs?: number;
+  configEpoch?: number | (() => Promise<number>);
   retentionSec?: number;
   egressAllow?: string[];
   egressDeny?: string[];
@@ -138,15 +167,22 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     .digest("hex")
     .slice(0, 16);
 
-  const configEpochMs = opts.configEpochMs ?? Date.now();
-  const scopeMetadata = (name: string): Record<string, string> => ({
-    [SUPERSERVE_METADATA.epoch]: String(configEpochMs),
+  const bootEpoch = Date.now();
+  const configEpoch = async (): Promise<number> =>
+    typeof opts.configEpoch === "function" ? opts.configEpoch() : (opts.configEpoch ?? bootEpoch);
+  void configEpoch().catch(swallowAs("superserve-sandbox: claim config generation", undefined));
+  const scopeMetadata = async (name: string): Promise<Record<string, string>> => ({
+    [SUPERSERVE_METADATA.epoch]: String(await configEpoch()),
     [SUPERSERVE_METADATA.scope]: name,
     [SUPERSERVE_METADATA.prefix]: prefix,
     [SUPERSERVE_METADATA.kind]: "scope",
     [SUPERSERVE_METADATA.egress]: egressTag,
     ...(opts.template ? { [SUPERSERVE_METADATA.template]: opts.template } : {}),
   });
+
+  const dropLive = (name: string, sandboxId: string): void => {
+    if (liveByName.get(name)?.session.id === sandboxId) liveByName.delete(name);
+  };
 
   async function forget(scope: string, sandboxId: string): Promise<void> {
     if (store.deleteIf) {
@@ -163,7 +199,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
   ): Promise<{ session: SuperserveSession; current: boolean }> {
     const info = await client.info(sandboxId);
     const stampedEpoch = Number(info.metadata[SUPERSERVE_METADATA.epoch] ?? 0);
-    if (stampedEpoch > configEpochMs) return { session: await client.connect(sandboxId), current: false };
+    if (stampedEpoch > (await configEpoch())) return { session: await client.connect(sandboxId), current: false };
     if (opts.template && info.metadata[SUPERSERVE_METADATA.template] !== opts.template) {
       await client.kill(sandboxId);
       const message = `sandbox ${sandboxId} was built from template ${info.metadata[SUPERSERVE_METADATA.template] ?? "unknown"}, not ${opts.template}; it was destroyed and the next provision creates a replacement`;
@@ -182,7 +218,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       await client.update(sandboxId, {
         timeoutSeconds: Math.max(info.timeoutSeconds ?? 0, idlePauseSec),
         autoDeleteSeconds: retentionSec,
-        metadata: { ...info.metadata, ...scopeMetadata(info.name) },
+        metadata: { ...info.metadata, ...(await scopeMetadata(info.name)) },
         ...(stale ? { network: adoptedNetwork } : {}),
       });
     } catch (err) {
@@ -216,11 +252,11 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         if (cached) {
           try {
             const info = await client.info(cached.session.id);
-            cached.current = Number(info.metadata[SUPERSERVE_METADATA.epoch] ?? 0) <= configEpochMs;
+            cached.current = Number(info.metadata[SUPERSERVE_METADATA.epoch] ?? 0) <= (await configEpoch());
             return { live: cached, coldStart: false };
           } catch (err) {
             if (!(err instanceof SuperserveSandboxGoneError)) throw err;
-            liveByName.delete(name);
+            dropLive(name, cached.session.id);
             await forget(scope, cached.session.id);
           }
         }
@@ -255,7 +291,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         }
         const session = await client.create({
           name,
-          metadata: scopeMetadata(name),
+          metadata: await scopeMetadata(name),
           ...(opts.template ? { template: opts.template } : {}),
           timeoutSeconds: idlePauseSec,
           autoDeleteSeconds: retentionSec,
@@ -270,7 +306,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
   async function createScratch(name: string): Promise<Live> {
     const session = await client.create({
       name,
-      metadata: { ...scopeMetadata(name), [SUPERSERVE_METADATA.kind]: "scratch" },
+      metadata: { ...(await scopeMetadata(name)), [SUPERSERVE_METADATA.kind]: "scratch" },
       ...(opts.template ? { template: opts.template } : {}),
       timeoutSeconds: SCRATCH_IDLE_PAUSE_SEC,
       autoDeleteSeconds: SCRATCH_RETENTION_SEC,
@@ -298,7 +334,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       return await action(live);
     } catch (err) {
       if (!(err instanceof SuperserveSandboxGoneError)) throw err;
-      liveByName.delete(name);
+      dropLive(name, live.session.id);
       const scope = scopeByName.get(name);
       if (scope !== undefined) await forget(scope, live.session.id);
       throw new Error(`superserve sandbox for ${name} is gone; the next provision creates a replacement`, {
@@ -532,6 +568,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       if (!stored) return { machine: "no sandbox provisioned yet", provisioned: false, guestResponsive: false };
       const machine = `superserve sandbox ${stored.sandboxId}`;
       const recovery = { strategy: "provider_pause" as const };
+      let inspectedId = stored.sandboxId;
       try {
         const info = await client.info(stored.sandboxId);
         if (info.status === "paused" || info.status === "pausing")
@@ -545,6 +582,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
           };
         scopeByName.set(name, scopeId);
         const { live } = await ensureLive(scopeId, name);
+        inspectedId = live.session.id;
         const r = await live.session.run("echo responsive", { timeoutMs: 30_000 });
         return {
           machine,
@@ -557,8 +595,8 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       } catch (e) {
         const gone = e instanceof SuperserveSandboxGoneError;
         if (gone) {
-          liveByName.delete(name);
-          await forget(scopeId, stored.sandboxId);
+          dropLive(name, inspectedId);
+          await forget(scopeId, inspectedId);
         }
         return {
           recovery,
@@ -580,8 +618,10 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
           }
           activeScratch.delete(handle.id);
           const live = liveByName.get(handle.id);
-          liveByName.delete(handle.id);
-          if (live) await live.session.kill().catch(swallowAs("superserve-sandbox: scratch kill", undefined));
+          if (live) {
+            dropLive(handle.id, live.session.id);
+            await live.session.kill().catch(swallowAs("superserve-sandbox: scratch kill", undefined));
+          }
         });
       }
       if (tdOpts?.destroy && !scopeByName.has(handle.id)) return;
@@ -598,7 +638,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       await live.session.update({ timeoutSeconds: tdOpts?.keepWarm ? keepWarmSec : idlePauseSec });
     } catch (err) {
       if (!(err instanceof SuperserveSandboxGoneError)) throw err;
-      liveByName.delete(name);
+      dropLive(name, live.session.id);
       await forget(scope, live.session.id);
     }
   }

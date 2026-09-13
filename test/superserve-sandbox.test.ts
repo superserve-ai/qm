@@ -4,8 +4,10 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  createConfigEpochResolver,
   createSuperserveSandbox,
   SUPERSERVE_METADATA,
+  type StoredConfigEpoch,
   type StoredSuperserveSandbox,
 } from "../src/sandbox/superserve-sandbox.ts";
 import { sandboxScopeName } from "../src/sandbox/exec-sandbox-base.ts";
@@ -276,13 +278,13 @@ test("a sandbox built from an older template is replaced on adoption", async () 
 });
 
 test("an older core never reverts a sandbox a newer core already reconfigured", async () => {
-  const older = make({ template: "qm-agent-1.0.0", configEpochMs: 1_000, idlePauseSec: 600, retentionSec: 3_600 });
+  const older = make({ template: "qm-agent-1.0.0", configEpoch: 1_000, idlePauseSec: 600, retentionSec: 3_600 });
   const first = await older.provision(layers);
   await older.teardown(first);
 
   const newer = make({
     template: "qm-agent-1.1.0",
-    configEpochMs: 2_000,
+    configEpoch: 2_000,
     egressDeny: ["0.0.0.0/0"],
     idlePauseSec: 1_200,
     retentionSec: 7_200,
@@ -291,7 +293,7 @@ test("an older core never reverts a sandbox a newer core already reconfigured", 
   assert.equal(fake.createdCount(scopeName()), 2);
   const upgradedId = fake.current(scopeName())!.id;
 
-  const olderAgain = make({ template: "qm-agent-1.0.0", configEpochMs: 1_000, idlePauseSec: 600, retentionSec: 3_600 });
+  const olderAgain = make({ template: "qm-agent-1.0.0", configEpoch: 1_000, idlePauseSec: 600, retentionSec: 3_600 });
   const h = await olderAgain.provision(layers);
   assert.equal(h.coldStart, false);
   assert.equal(fake.createdCount(scopeName()), 2, "no third sandbox");
@@ -308,11 +310,11 @@ test("an older core never reverts a sandbox a newer core already reconfigured", 
 });
 
 test("an older core with a cached session stops configuring once a newer core takes over", async () => {
-  const older = make({ configEpochMs: 1_000, idlePauseSec: 600 });
+  const older = make({ configEpoch: 1_000, idlePauseSec: 600 });
   const h = await older.provision(layers);
   await older.teardown(h);
 
-  const newer = make({ configEpochMs: 2_000, idlePauseSec: 1_800 });
+  const newer = make({ configEpoch: 2_000, idlePauseSec: 1_800 });
   await newer.teardown(await newer.provision(layers));
   assert.equal(fake.current(scopeName())?.timeoutSeconds, 1_800);
 
@@ -323,20 +325,59 @@ test("an older core with a cached session stops configuring once a newer core ta
 });
 
 test("a newer core stamps its epoch even when only lifecycle settings changed", async () => {
-  const older = make({ configEpochMs: 1_000, idlePauseSec: 600 });
+  const older = make({ configEpoch: 1_000, idlePauseSec: 600 });
   await older.teardown(await older.provision(layers));
   assert.equal(fake.current(scopeName())?.metadata[SUPERSERVE_METADATA.epoch], "1000");
 
-  const newer = make({ configEpochMs: 2_000, idlePauseSec: 900, retentionSec: 7_200 });
+  const newer = make({ configEpoch: 2_000, idlePauseSec: 900, retentionSec: 7_200 });
   await newer.provision(layers);
   assert.equal(fake.createdCount(scopeName()), 1);
   assert.equal(fake.current(scopeName())?.metadata[SUPERSERVE_METADATA.epoch], "2000");
   assert.equal(fake.current(scopeName())?.autoDeleteSeconds, 7_200);
 
-  const olderAgain = make({ configEpochMs: 1_000, idlePauseSec: 600, retentionSec: 3_600 });
+  const olderAgain = make({ configEpoch: 1_000, idlePauseSec: 600, retentionSec: 3_600 });
   await olderAgain.teardown(await olderAgain.provision(layers));
   assert.equal(fake.current(scopeName())?.autoDeleteSeconds, 7_200);
   assert.equal(fake.current(scopeName())?.timeoutSeconds, 900);
+});
+
+test("the config epoch is claimed once per deployment generation, so a restarted core cannot outrank a newer one", async () => {
+  const epochs: DurableMap<StoredConfigEpoch> = createMemoryMap();
+  const claimed = await createConfigEpochResolver(epochs, "release-1")();
+  assert.equal(claimed, 1);
+  assert.equal(await createConfigEpochResolver(epochs, "release-1")(), claimed, "a restart reuses its own generation");
+  const newRelease = await createConfigEpochResolver(epochs, "release-2")();
+  assert.equal(newRelease, claimed + 1, "each new generation is strictly higher than every generation before it");
+  assert.equal(await createConfigEpochResolver(epochs, "release-1")(), claimed, "a restart still ranks below it");
+
+  const older = make({ configEpoch: createConfigEpochResolver(epochs, "release-1"), idlePauseSec: 600 });
+  await older.teardown(await older.provision(layers));
+  assert.equal(fake.current(scopeName())?.metadata[SUPERSERVE_METADATA.epoch], String(claimed));
+
+  const newer = make({ configEpoch: createConfigEpochResolver(epochs, "release-2"), idlePauseSec: 1_800 });
+  await newer.teardown(await newer.provision(layers));
+  assert.equal(fake.current(scopeName())?.timeoutSeconds, 1_800);
+
+  const restarted = make({ configEpoch: createConfigEpochResolver(epochs, "release-1"), idlePauseSec: 600 });
+  await restarted.teardown(await restarted.provision(layers));
+  assert.equal(fake.current(scopeName())?.timeoutSeconds, 1_800, "the restarted older release stays passive");
+  assert.equal(fake.current(scopeName())?.metadata[SUPERSERVE_METADATA.epoch], String(newRelease));
+});
+
+test("a command that finds its sandbox gone leaves a replacement provisioned meanwhile in place", async () => {
+  const store: DurableMap<StoredSuperserveSandbox> = createMemoryMap();
+  sandbox = make({ store });
+  const h = await sandbox.provision(layers);
+  const lostId = fake.current(scopeName())!.id;
+  fake.beforeNextRun(async () => {
+    fake.expire(scopeName());
+    await sandbox.provision(layers);
+  });
+  await assert.rejects(sandbox.run(h, "echo back"), /is gone/);
+  const replacement = fake.current(scopeName())!;
+  assert.notEqual(replacement.id, lostId);
+  assert.equal((await sandbox.run(h, "echo again")).stdout.trim(), "again", "the replacement stays usable");
+  assert.equal((await store.get(scope))?.sandboxId, replacement.id);
 });
 
 test("a gone sandbox never forgets a replacement another instance already recorded", async () => {

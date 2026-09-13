@@ -138,6 +138,123 @@ test("a paused sandbox under a different egress policy is destroyed and replaced
   assert.equal(await tightened.readFile(replaced, "old.txt"), null);
 });
 
+test("a paused sandbox that predates egress stamping keeps its disk when the policy still matches", async () => {
+  const store: DurableMap<StoredSuperserveSandbox> = createMemoryMap();
+  sandbox = make({ store });
+  const h = await sandbox.provision(layers);
+  await sandbox.writeFile(h, "resident.txt", "months of work\n");
+  const record = fake.current(scopeName())!;
+  const originalId = record.id;
+  delete record.metadata[SUPERSERVE_METADATA.egress];
+  await sandbox.teardown(h);
+  fake.pause(scopeName());
+
+  const upgraded = make({ store });
+  const adopted = await upgraded.provision(layers);
+  assert.equal(adopted.coldStart, false, "an unstamped sandbox is adopted, never destroyed");
+  assert.equal(fake.createdCount(scopeName()), 1);
+  assert.equal(fake.current(scopeName())!.id, originalId);
+  assert.equal(await upgraded.readFile(adopted, "resident.txt"), "months of work\n");
+  assert.ok(fake.current(scopeName())!.metadata[SUPERSERVE_METADATA.egress], "and it is stamped on adoption");
+});
+
+test("the provider's network decides the policy, not the sandbox's own stamp", async () => {
+  sandbox = make({ egressDeny: ["0.0.0.0/0"], egressAllow: ["api.anthropic.com"] });
+  const h = await sandbox.provision(layers);
+  await sandbox.teardown(h);
+  const record = fake.current(scopeName())!;
+  const stampedId = record.id;
+  const stamp = record.metadata[SUPERSERVE_METADATA.egress];
+  record.network = { allowOut: ["evil.example.com"], denyOut: [] };
+  fake.pause(scopeName());
+
+  const again = make({ egressDeny: ["0.0.0.0/0"], egressAllow: ["api.anthropic.com"] });
+  await again.provision(layers);
+  assert.equal(
+    fake.current(scopeName())!.metadata[SUPERSERVE_METADATA.egress],
+    stamp,
+    "the stamp still claimed a match",
+  );
+  assert.notEqual(fake.current(scopeName())!.id, stampedId, "but drifted network state is caught anyway");
+  assert.ok(fake.calls().includes(`kill:${stampedId}`));
+  assert.deepEqual(fake.current(scopeName())?.network, { allowOut: ["api.anthropic.com"], denyOut: ["0.0.0.0/0"] });
+});
+
+test("a paused sandbox keeps its disk when the provider accepts the policy change without resuming", async () => {
+  const store: DurableMap<StoredSuperserveSandbox> = createMemoryMap();
+  fake.acceptNetworkUpdateWhilePaused();
+  sandbox = make({ store });
+  const h = await sandbox.provision(layers);
+  await sandbox.writeFile(h, "resident.txt", "months of work\n");
+  await sandbox.teardown(h);
+  fake.pause(scopeName());
+  const keptId = fake.current(scopeName())!.id;
+
+  const tightened = make({ store, egressDeny: ["0.0.0.0/0"], egressAllow: ["api.anthropic.com"] });
+  const adopted = await tightened.provision(layers);
+  assert.equal(fake.createdCount(scopeName()), 1, "a routine policy change never destroys the disk");
+  assert.equal(fake.current(scopeName())!.id, keptId);
+  assert.deepEqual(fake.current(scopeName())?.network, { allowOut: ["api.anthropic.com"], denyOut: ["0.0.0.0/0"] });
+  assert.equal(await tightened.readFile(adopted, "resident.txt"), "months of work\n");
+  const calls = fake.calls();
+  assert.ok(
+    calls.lastIndexOf(`update:${keptId}`) < calls.lastIndexOf(`connect:${keptId}`),
+    "the policy lands before the sandbox is resumed",
+  );
+});
+
+test("a policy update the provider silently drops never resumes the sandbox under the old policy", async () => {
+  fake.ignoreNetworkUpdateWhilePaused();
+  const errors: string[] = [];
+  sandbox = make();
+  const h = await sandbox.provision(layers);
+  await sandbox.teardown(h);
+  fake.pause(scopeName());
+  const oldId = fake.current(scopeName())!.id;
+
+  const tightened = make({
+    egressDeny: ["0.0.0.0/0"],
+    egressAllow: ["api.anthropic.com"],
+    onError: (e: { category: string; code: string }) => errors.push(`${e.category}:${e.code}`),
+  });
+  await tightened.provision(layers);
+  assert.notEqual(fake.current(scopeName())!.id, oldId, "an unverified policy is never trusted");
+  assert.ok(fake.calls().includes(`kill:${oldId}`));
+  assert.equal(fake.calls().indexOf(`connect:${oldId}`, fake.calls().indexOf(`pause:${oldId}`)), -1, "never resumed");
+  assert.deepEqual(errors, ["sandbox_egress:policy_changed"]);
+});
+
+test("a cached sandbox whose network drifted is reconciled before the next command", async () => {
+  const store: DurableMap<StoredSuperserveSandbox> = createMemoryMap();
+  sandbox = make({ store, egressDeny: ["0.0.0.0/0"], egressAllow: ["api.anthropic.com"] });
+  const h = await sandbox.provision(layers);
+  const id = fake.current(scopeName())!.id;
+  fake.current(scopeName())!.network = { allowOut: ["evil.example.com"], denyOut: [] };
+
+  const again = await sandbox.provision(layers);
+  assert.equal(again.coldStart, false, "the cached sandbox is reused");
+  assert.equal(fake.current(scopeName())!.id, id);
+  assert.deepEqual(
+    fake.current(scopeName())?.network,
+    { allowOut: ["api.anthropic.com"], denyOut: ["0.0.0.0/0"] },
+    "drift on a cached session is repaired rather than trusted",
+  );
+  assert.equal((await sandbox.run(h, "echo ok")).stdout.trim(), "ok");
+});
+
+test("a cached scratch sandbox whose network drifted is replaced", async () => {
+  sandbox = make({ egressDeny: ["0.0.0.0/0"] });
+  const first = await sandbox.provision(layers, { scratch: { key: "job" } });
+  const firstId = fake.current(first.id)!.id;
+  fake.current(first.id)!.network = { allowOut: ["evil.example.com"], denyOut: [] };
+
+  const second = await sandbox.provision(layers, { scratch: { key: "job" } });
+  assert.equal(second.coldStart, true);
+  assert.notEqual(fake.current(first.id)!.id, firstId);
+  assert.deepEqual(fake.current(first.id)?.network, { denyOut: ["0.0.0.0/0"] });
+  assert.ok(fake.calls().includes(`kill:${firstId}`));
+});
+
 test("an active sandbox gets a changed egress policy applied before its first command", async () => {
   sandbox = make();
   const h = await sandbox.provision(layers);

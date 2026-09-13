@@ -162,6 +162,7 @@ function portalEnv() {
     CORE_API_URL: CORE_URL,
     CORE_ORG_ID: env.ORG_ID,
     WEB_UI_UPSTREAM: WEB_UI_URL,
+    ADMIN_ENABLED: adminEnabled() ? "1" : "0",
   });
   if (adminEnabled()) out.ADMIN_UPSTREAM = `${WEB_UI_URL}/admin`;
   const defaults = { PORTAL_PUBLIC_URL: base };
@@ -306,13 +307,30 @@ function shutdown(signal) {
   terminate(0, DRAIN_MS + SHUTDOWN_BACKSTOP_MS, true);
 }
 
+function slackAccountsRequestHttpEvents() {
+  const raw = env.SLACK_ACCOUNTS?.trim();
+  if (!raw) return false;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return false;
+  }
+  return (
+    Array.isArray(parsed) &&
+    parsed.some(
+      (entry) => typeof entry === "object" && entry !== null && String(entry.eventsMode ?? "").trim() === "http",
+    )
+  );
+}
+
 async function main() {
   const missing = REQUIRED.filter((name) => !isSet(name));
   if (missing.length) {
     warn(`missing required environment: ${missing.join(", ")}`);
     process.exit(2);
   }
-  if (env.SLACK_EVENTS_MODE?.trim() === "http") {
+  if (env.SLACK_EVENTS_MODE?.trim() === "http" || slackAccountsRequestHttpEvents()) {
     warn(
       "SLACK_EVENTS_MODE=http is not supported by this image: only portal is public and it does not forward /slack/events; use Slack socket mode",
     );

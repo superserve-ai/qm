@@ -307,6 +307,21 @@ test("an older core never reverts a sandbox a newer core already reconfigured", 
   assert.equal(fake.current(scopeName())?.timeoutSeconds, 1_200, "older core's teardown does not touch the timeout");
 });
 
+test("an older core with a cached session stops configuring once a newer core takes over", async () => {
+  const older = make({ configEpochMs: 1_000, idlePauseSec: 600 });
+  const h = await older.provision(layers);
+  await older.teardown(h);
+
+  const newer = make({ configEpochMs: 2_000, idlePauseSec: 1_800 });
+  await newer.teardown(await newer.provision(layers));
+  assert.equal(fake.current(scopeName())?.timeoutSeconds, 1_800);
+
+  const again = await older.provision(layers);
+  assert.equal(again.coldStart, false);
+  await older.teardown(again);
+  assert.equal(fake.current(scopeName())?.timeoutSeconds, 1_800, "cached older core no longer rewrites the timeout");
+});
+
 test("a newer core stamps its epoch even when only lifecycle settings changed", async () => {
   const older = make({ configEpochMs: 1_000, idlePauseSec: 600 });
   await older.teardown(await older.provision(layers));

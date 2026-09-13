@@ -215,7 +215,8 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         const cached = liveByName.get(name);
         if (cached) {
           try {
-            await client.info(cached.session.id);
+            const info = await client.info(cached.session.id);
+            cached.current = Number(info.metadata[SUPERSERVE_METADATA.epoch] ?? 0) <= configEpochMs;
             return { live: cached, coldStart: false };
           } catch (err) {
             if (!(err instanceof SuperserveSandboxGoneError)) throw err;

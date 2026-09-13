@@ -18,7 +18,8 @@ const GH_VERSION = "2.93.0";
 const GH_SHA256_AMD64 = "02d1290eba130e0b896f3709ffff22e1c75a51475ddb70476a85abc6b5807af0";
 const AWSCLI_VERSION = "2.34.54";
 const AWSCLI_SHA256_X86_64 = "de278754dec97e0f6e9b4e8167d4bd1a27004c3e56e9c2da10002597f76ca35a";
-const NODE_MAJOR = "24";
+const NODE_VERSION = "24.18.0";
+const NODE_SHA256_X64 = "55aa7153f9d88f28d765fcdad5ae6945b5c0f98a36881703817e4c450fa76742";
 const AGENT_VENV = "/opt/agent-venv";
 const BASE_IMAGE = "ubuntu:24.04";
 
@@ -66,11 +67,11 @@ function buildSteps(): BuildStep[] {
     },
     {
       run: sh([
-        `curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o /tmp/nodesource.sh`,
-        "bash /tmp/nodesource.sh",
-        "rm -f /tmp/nodesource.sh",
-        "apt-get install -y --no-install-recommends nodejs",
-        "rm -rf /var/lib/apt/lists/*",
+        `curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" -o /tmp/node.tar.xz`,
+        `echo "${NODE_SHA256_X64}  /tmp/node.tar.xz" | sha256sum -c -`,
+        "tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner" +
+          " --exclude=CHANGELOG.md --exclude=LICENSE --exclude=README.md",
+        "rm -f /tmp/node.tar.xz",
         "node --version",
         "npm --version",
       ]),

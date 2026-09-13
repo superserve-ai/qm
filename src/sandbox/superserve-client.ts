@@ -24,6 +24,7 @@ export interface SuperserveSandboxInfo extends SuperserveSandboxSummary {
   memoryMib?: number;
   timeoutSeconds?: number;
   autoDeleteAtMs?: number;
+  network?: SuperserveNetwork;
 }
 
 interface SuperserveRunOptions {
@@ -83,12 +84,52 @@ export interface SdkSuperserveClientOptions {
 const DEFAULT_MAX_COMMAND_MS = 3600_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 
-const clampUtf8 = (text: string, maxBytes: number): string => {
+export interface OutputLimiter {
+  stdout(chunk: string): void;
+  stderr(chunk: string): void;
+  text(stream: "stdout" | "stderr"): string;
+  truncated(): boolean;
+}
+
+export function createOutputLimiter(maxBytes: number): OutputLimiter {
+  const streams = {
+    stdout: { text: "", bytes: 0, done: false },
+    stderr: { text: "", bytes: 0, done: false },
+  };
+  let truncated = false;
+  const take = (stream: { text: string; bytes: number; done: boolean }, chunk: string): void => {
+    if (stream.done) {
+      truncated = true;
+      return;
+    }
+    const room = maxBytes - stream.bytes;
+    const chunkBytes = Buffer.byteLength(chunk, "utf8");
+    if (chunkBytes <= room) {
+      stream.text += chunk;
+      stream.bytes += chunkBytes;
+      return;
+    }
+    truncated = true;
+    stream.done = true;
+    const kept = clampUtf8(chunk, room);
+    stream.text += kept;
+    stream.bytes += Buffer.byteLength(kept, "utf8");
+  };
+  return {
+    stdout: (chunk) => take(streams.stdout, chunk),
+    stderr: (chunk) => take(streams.stderr, chunk),
+    text: (stream) => streams[stream].text,
+    truncated: () => truncated,
+  };
+}
+
+export const clampUtf8 = (text: string, maxBytes: number): string => {
   if (maxBytes <= 0) return "";
   const encoded = Buffer.from(text, "utf8");
   if (encoded.length <= maxBytes) return text;
-  const kept = encoded.subarray(0, maxBytes).toString("utf8");
-  return kept.endsWith("\uFFFD") ? kept.slice(0, -1) : kept;
+  let end = maxBytes;
+  while (end > 0 && (encoded[end]! & 0xc0) === 0x80) end -= 1;
+  return encoded.subarray(0, end).toString("utf8");
 };
 const GONE_STATES: ReadonlySet<string> = new Set(["deleted", "failed"]);
 
@@ -130,41 +171,18 @@ export function createSdkSuperserveClient(opts: SdkSuperserveClientOptions): Sup
     async run(command, runOpts): Promise<SuperserveCommandResult> {
       const timeoutMs = runOpts?.timeoutMs ?? maxCommandMs;
       const cap = runOpts?.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
-      const out = { text: "", bytes: 0 };
-      const err = { text: "", bytes: 0 };
-      let truncated = false;
-      const take = (stream: { text: string; bytes: number }, chunk: string): void => {
-        const room = cap - stream.bytes;
-        if (room <= 0) {
-          truncated = true;
-          return;
-        }
-        const chunkBytes = Buffer.byteLength(chunk, "utf8");
-        if (chunkBytes <= room) {
-          stream.text += chunk;
-          stream.bytes += chunkBytes;
-          return;
-        }
-        truncated = true;
-        const kept = clampUtf8(chunk, room);
-        stream.text += kept;
-        stream.bytes += Buffer.byteLength(kept, "utf8");
-      };
+      const limiter = createOutputLimiter(cap);
       try {
         const r = await sbx.commands.run(command, {
           timeoutMs,
-          onStdout: (chunk) => {
-            take(out, chunk);
-          },
-          onStderr: (chunk) => {
-            take(err, chunk);
-          },
+          onStdout: limiter.stdout,
+          onStderr: limiter.stderr,
         });
         return {
-          stdout: out.text || clampUtf8(r.stdout ?? "", cap),
-          stderr: err.text || clampUtf8(r.stderr ?? "", cap),
+          stdout: limiter.text("stdout") || clampUtf8(r.stdout ?? "", cap),
+          stderr: limiter.text("stderr") || clampUtf8(r.stderr ?? "", cap),
           exitCode: r.exitCode,
-          ...(truncated || r.truncated ? { truncated: true } : {}),
+          ...(limiter.truncated() || r.truncated ? { truncated: true } : {}),
         };
       } catch (err) {
         if (isGoneError(err)) gone(sbx.id, err);
@@ -229,11 +247,13 @@ export function createSdkSuperserveClient(opts: SdkSuperserveClientOptions): Sup
     memoryMib?: number;
     timeoutSeconds?: number;
     autoDeleteAt?: Date;
+    network?: SuperserveNetwork;
   }): SuperserveSandboxInfo => ({
     id: i.id,
     name: i.name,
     status: i.status,
     metadata: i.metadata ?? {},
+    ...(i.network ? { network: i.network } : {}),
     ...(i.vcpuCount !== undefined ? { vcpuCount: i.vcpuCount } : {}),
     ...(i.memoryMib !== undefined ? { memoryMib: i.memoryMib } : {}),
     ...(i.timeoutSeconds !== undefined ? { timeoutSeconds: i.timeoutSeconds } : {}),

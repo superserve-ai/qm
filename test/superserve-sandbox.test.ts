@@ -272,6 +272,26 @@ test("a sandbox built from an older template is replaced on adoption", async () 
   assert.equal(fake.createdCount(scopeName()), 2);
 });
 
+test("an older core never reverts a sandbox a newer core already reconfigured", async () => {
+  const older = make({ template: "qm-agent-1.0.0", configEpochMs: 1_000 });
+  const first = await older.provision(layers);
+  await older.teardown(first);
+
+  const newer = make({ template: "qm-agent-1.1.0", configEpochMs: 2_000, egressDeny: ["0.0.0.0/0"] });
+  await newer.provision(layers);
+  assert.equal(fake.createdCount(scopeName()), 2);
+  const upgradedId = fake.current(scopeName())!.id;
+
+  const olderAgain = make({ template: "qm-agent-1.0.0", configEpochMs: 1_000 });
+  const h = await olderAgain.provision(layers);
+  assert.equal(h.coldStart, false);
+  assert.equal(fake.createdCount(scopeName()), 2, "no third sandbox");
+  assert.equal(fake.current(scopeName())!.id, upgradedId);
+  assert.equal(fake.current(scopeName())?.metadata[SUPERSERVE_METADATA.template], "qm-agent-1.1.0");
+  assert.deepEqual(fake.current(scopeName())?.network, { denyOut: ["0.0.0.0/0"] });
+  assert.equal((await olderAgain.run(h, "echo ok")).stdout.trim(), "ok");
+});
+
 test("a gone sandbox never forgets a replacement another instance already recorded", async () => {
   const store: DurableMap<StoredSuperserveSandbox> = createMemoryMap();
   sandbox = make({ store });

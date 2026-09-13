@@ -670,9 +670,10 @@ function validate(raw: unknown, path: string): QmConfig {
     return v;
   });
   const sandbox = validateSandbox(o["sandbox"], path, target);
-  if (sandbox?.backend === "superserve" && !env.core?.SUPERSERVE_TEMPLATE?.trim()) {
+  const effectiveSandboxBackend = sandbox?.backend ?? env.core?.SANDBOX_BACKEND?.trim();
+  if (effectiveSandboxBackend === "superserve" && !env.core?.SUPERSERVE_TEMPLATE?.trim()) {
     throw new CliError(
-      `${path}: "sandbox.backend": "superserve" requires env.core.SUPERSERVE_TEMPLATE (the ready qm-agent-<release> template); core refuses to start without it`,
+      `${path}: the superserve sandbox backend requires env.core.SUPERSERVE_TEMPLATE (the ready qm-agent-<release> template); core refuses to start without it`,
     );
   }
 

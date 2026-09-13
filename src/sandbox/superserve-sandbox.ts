@@ -65,6 +65,7 @@ export const SUPERSERVE_METADATA = {
   kind: "qm_kind",
   egress: "qm_egress",
   template: "qm_template",
+  epoch: "qm_config_epoch",
 } as const;
 
 export interface StoredSuperserveSandbox {
@@ -80,6 +81,7 @@ export interface SuperserveSandboxOptions extends BlobStagingOptions {
   homeDir?: string;
   idlePauseSec?: number;
   keepWarmSec?: number;
+  configEpochMs?: number;
   retentionSec?: number;
   egressAllow?: string[];
   egressDeny?: string[];
@@ -132,7 +134,9 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     .digest("hex")
     .slice(0, 16);
 
+  const configEpochMs = opts.configEpochMs ?? Date.now();
   const scopeMetadata = (name: string): Record<string, string> => ({
+    [SUPERSERVE_METADATA.epoch]: String(configEpochMs),
     [SUPERSERVE_METADATA.scope]: name,
     [SUPERSERVE_METADATA.prefix]: prefix,
     [SUPERSERVE_METADATA.kind]: "scope",
@@ -151,6 +155,14 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
 
   async function reconnect(scope: string, sandboxId: string): Promise<SuperserveSession> {
     const info = await client.info(sandboxId);
+    const stampedEpoch = Number(info.metadata[SUPERSERVE_METADATA.epoch] ?? 0);
+    if (stampedEpoch > configEpochMs) {
+      await client.update(sandboxId, {
+        timeoutSeconds: Math.max(info.timeoutSeconds ?? 0, idlePauseSec),
+        autoDeleteSeconds: retentionSec,
+      });
+      return client.connect(sandboxId);
+    }
     if (opts.template && info.metadata[SUPERSERVE_METADATA.template] !== opts.template) {
       await client.kill(sandboxId);
       const message = `sandbox ${sandboxId} was built from template ${info.metadata[SUPERSERVE_METADATA.template] ?? "unknown"}, not ${opts.template}; it was destroyed and the next provision creates a replacement`;

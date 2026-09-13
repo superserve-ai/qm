@@ -391,6 +391,10 @@ test("SANDBOX_BACKEND: unset defaults to local (dev only); the retired secondary
     () => loadConfig({ SANDBOX_BACKEND: "superserve", SUPERSERVE_API_KEY: "ss_live_k" }),
     /SUPERSERVE_TEMPLATE/,
   );
+  assert.throws(
+    () => loadConfig({ SANDBOX_BACKEND: " superserve ", SUPERSERVE_API_KEY: "ss_live_k" }),
+    /SUPERSERVE_TEMPLATE/,
+  );
   assert.equal(
     loadConfig({
       SANDBOX_BACKEND: "superserve",

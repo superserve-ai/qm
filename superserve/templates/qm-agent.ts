@@ -66,7 +66,9 @@ function buildSteps(): BuildStep[] {
     },
     {
       run: sh([
-        `curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash -`,
+        `curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o /tmp/nodesource.sh`,
+        "bash /tmp/nodesource.sh",
+        "rm -f /tmp/nodesource.sh",
         "apt-get install -y --no-install-recommends nodejs",
         "rm -rf /var/lib/apt/lists/*",
         "node --version",

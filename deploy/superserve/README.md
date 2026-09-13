@@ -160,9 +160,47 @@ With embedded auth off, portal expects an external OIDC provider and `OIDC_CLIEN
 docker build -f deploy/superserve/Dockerfile --build-arg GIT_SHA=$(git rev-parse HEAD) -t qm-tenant:local .
 ```
 
-The image follows `deploy/core/Dockerfile` and the plugin Dockerfiles: `node:24-alpine` (same digest), `npm ci --omit=dev` for core, web-ui and portal, a separate build stage for web-ui's Vite bundle, auth resolving its dependencies through portal's `node_modules`, non-root `node` user, `EXPOSE 8080`. It does not include `docker-cli` (no daemon in Cloud Run) and skips the `npm audit` step of the core image; run the audit in CI instead.
+The image follows `deploy/core/Dockerfile` and the plugin Dockerfiles: `node:24-alpine` (same digest), `npm ci --omit=dev` for core, web-ui and portal, a separate build stage for web-ui's Vite bundle, auth resolving its dependencies through portal's `node_modules`, non-root `node` user, `EXPOSE 8080`. It does not include `docker-cli` (no daemon in Cloud Run) and skips the `npm audit` step of the core image; the publish workflow runs that audit instead, over each of the three lockfiles this image installs from.
 
 Measured on this branch (Docker Desktop, Apple Silicon, local compose Postgres and MinIO): image size 671 MB; cold start from `docker run` to the first `200` on `/healthz`, migrations included, 13.8 to 14.4 s across three starts; killing the core child produced a container exit of `1` within 0.4 to 0.5 s; `docker stop` returned in about 0.5 s with exit `0` and the drain lines in the log.
+
+## Publishing
+
+`.github/workflows/publish-tenant-image.yml` publishes this image to Artifact Registry. It runs on a push of a release tag of the form `v<upstream version>-ss.<n>` (for example `v0.1.0-ss.3`), or by hand through `workflow_dispatch` run against such a tag — the tag has to be the run's own ref, because that is what the `release` environment's deployment rule is evaluated against. The `release` job checks that the run's ref is a tag of that form before anything else runs, so a dispatch from a branch — including one named like a tag — fails in seconds rather than after a full suite, and resolves it once to a commit SHA that every later job checks out, so a tag moved mid-run cannot leave the tested and the published commit different. The `test` and `test-postgres` jobs run what the main CI workflow runs for everything the image embeds: the core typecheck, lint, the five root test shards, the Postgres-backed suite, and the typecheck, tests, and (for web-ui) build of the admin, auth, portal, and web-ui plugins. They also run `npm audit --omit=dev --audit-level=moderate` over the root, web-ui, and portal lockfiles, which is the audit the image's Dockerfile leaves to CI. A red suite blocks the `publish` job.
+
+Those jobs exercise the packages individually, so a `smoke` job additionally builds this Dockerfile and boots the resulting image against a throwaway Postgres, in production mode with embedded auth on: it waits for portal on the container port, then checks core, web-ui, the lazily imported admin module at `/admin/`, and the broker's JWKS on loopback inside the container. Embedded auth is part of the run because the broker resolves its dependencies through portal's `node_modules`, which is the most fragile thing the image does. `deploy/superserve/smoke.sh` is that check and runs the same way locally (it builds the image itself unless `TENANT_IMAGE` names one). Without it the single-container assembly and the supervisor would be the one thing published without ever being booted. The publish job builds `deploy/superserve/Dockerfile` for `linux/amd64` with `GIT_SHA` set to the tagged commit and pushes
+
+```
+<GCP_REGION>-docker.pkg.dev/<GCP_PROJECT>/superserve/qm-tenant:<tag>
+<GCP_REGION>-docker.pkg.dev/<GCP_PROJECT>/superserve/qm-tenant:<tag>-<short sha>
+```
+
+The run summary records both tags and the immutable `@sha256:` digest; the provisioner pins the digest.
+
+The workflow authenticates with Workload Identity Federation and needs, in the fork repository's Actions settings:
+
+| Kind     | Name                             | Value                                                                                                    |
+| -------- | -------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| secret   | `GCP_WORKLOAD_IDENTITY_PROVIDER` | `projects/<project number>/locations/global/workloadIdentityPools/github-pool/providers/github-provider` |
+| secret   | `GCP_SERVICE_ACCOUNT`            | the CI service account email                                                                             |
+| variable | `GCP_PROJECT`                    | the platform project id                                                                                  |
+| variable | `GCP_REGION`                     | `us-central1`                                                                                            |
+
+The `publish` job runs in the `release` environment, and the trust is bound to that environment rather than to the repository alone: anyone who can push a branch can otherwise dispatch a workflow that mints a repository-scoped token and writes to the registry without going through the tests. In the fork repository's Environments settings, `release` restricts deployments to the release tag pattern and requires a reviewer — the environment subject carries no ref of its own, so the tag restriction is what ties it to a release.
+
+On the GCP side, in the platform project: the `github-provider` provider in the `github-pool` pool must map `google.subject` to `assertion.sub` and carry the attribute condition
+
+```
+assertion.repository == "superserve-ai/qm-superserve" && assertion.sub == "repo:superserve-ai/qm-superserve:environment:release"
+```
+
+so a token minted by any other repository, branch, or job is rejected at the provider. That subject
+
+```
+principal://iam.googleapis.com/projects/<project number>/locations/global/workloadIdentityPools/github-pool/subject/repo:superserve-ai/qm-superserve:environment:release
+```
+
+needs `roles/iam.workloadIdentityUser` on the CI service account, and the CI service account needs `roles/artifactregistry.writer` on the `superserve` Artifact Registry repository only, not on the project.
 
 ## Running locally
 

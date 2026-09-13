@@ -1,0 +1,245 @@
+name: Publish the tenant image
+
+on:
+  push:
+    tags:
+      - "v*-ss.*"
+  workflow_dispatch:
+
+concurrency:
+  group: publish-tenant-image-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ github.ref_name }}
+
+jobs:
+  release:
+    name: Resolve the release tag
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.tag.outputs.sha }}
+      short: ${{ steps.tag.outputs.short }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - id: tag
+        run: |
+          set -euo pipefail
+          if ! printf '%s\n' "$GITHUB_REF" | grep -Eq '^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+-ss\.[0-9]+$'; then
+            echo "publish runs from a release tag like v0.1.0-ss.3; this run is on $GITHUB_REF" >&2
+            exit 1
+          fi
+          sha=$(git rev-parse HEAD)
+          printf 'sha=%s\nshort=%s\n' "$sha" "${sha:0:7}" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: ${{ matrix.name }}
+    needs: release
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Core typecheck
+            run: npm run typecheck
+          - name: Audit
+            run: |
+              for dir in . plugins/web-ui plugins/portal; do
+                npm audit --omit=dev --audit-level=moderate --prefix "$dir"
+              done
+          - name: Lint
+            run: |
+              npm ci --prefix plugins/web-ui
+              npm run format:check
+              npm run lint
+              npm run lint:knip
+              npm run lint:ox
+          - name: Core tests (1/5)
+            shard: 1/5
+            run: |
+              npm run test:root:shard:check
+              npm run test:root:shard
+          - name: Core tests (2/5)
+            shard: 2/5
+            run: npm run test:root:shard
+          - name: Core tests (3/5)
+            shard: 3/5
+            run: npm run test:root:shard
+          - name: Core tests (4/5)
+            shard: 4/5
+            run: npm run test:root:shard
+          - name: Core tests (5/5)
+            shard: 5/5
+            run: npm run test:root:shard
+          - name: Admin plugin
+            run: |
+              cd plugins/admin
+              npm ci
+              npm run typecheck
+              npm test
+          - name: Auth plugin
+            run: |
+              cd plugins/auth
+              npm ci
+              npm run typecheck
+              npm test
+          - name: Portal plugin
+            run: |
+              npm ci --prefix plugins/auth
+              cd plugins/portal
+              npm ci
+              npm run typecheck
+              npm test
+          - name: Web UI plugin
+            run: |
+              cd plugins/web-ui
+              npm ci
+              npm run typecheck
+              npm test
+              npm run build
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: ${{ needs.release.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            plugins/admin/package-lock.json
+            plugins/auth/package-lock.json
+            plugins/portal/package-lock.json
+            plugins/web-ui/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: ${{ matrix.name }}
+        env:
+          CORE_TEST_SHARD: ${{ matrix.shard }}
+        run: ${{ matrix.run }}
+
+  test-postgres:
+    name: Core Postgres tests
+    needs: release
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: qm
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: ${{ needs.release.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Postgres-backed tests
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/qm
+        run: npm run test:pg
+      - name: Model registry cross-process tests
+        env:
+          MODEL_OVERLAY_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/qm
+        run: node --experimental-test-module-mocks --test test/model-overlay-postgres.test.ts
+
+  smoke:
+    name: Tenant image smoke
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: ${{ needs.release.outputs.sha }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: deploy/superserve/Dockerfile
+          platforms: linux/amd64
+          provenance: false
+          load: true
+          tags: qm-tenant:runtime-smoke
+          build-args: GIT_SHA=${{ needs.release.outputs.sha }}
+          cache-from: type=gha,scope=qm-tenant
+          cache-to: type=gha,mode=max,scope=qm-tenant
+      - name: Boot the image
+        env:
+          TENANT_IMAGE: qm-tenant:runtime-smoke
+        run: bash deploy/superserve/smoke.sh
+
+  publish:
+    name: Publish
+    needs:
+      - release
+      - smoke
+      - test
+      - test-postgres
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      IMAGE: ${{ vars.GCP_REGION }}-docker.pkg.dev/${{ vars.GCP_PROJECT }}/superserve/qm-tenant
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: ${{ needs.release.outputs.sha }}
+          persist-credentials: false
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      - name: Configure Docker
+        run: gcloud auth configure-docker ${{ vars.GCP_REGION }}-docker.pkg.dev --quiet
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+      - id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: deploy/superserve/Dockerfile
+          platforms: linux/amd64
+          provenance: false
+          push: true
+          build-args: GIT_SHA=${{ needs.release.outputs.sha }}
+          tags: |
+            ${{ env.IMAGE }}:${{ env.RELEASE_TAG }}
+            ${{ env.IMAGE }}:${{ env.RELEASE_TAG }}-${{ needs.release.outputs.short }}
+          cache-from: type=gha,scope=qm-tenant
+          cache-to: type=gha,mode=max,scope=qm-tenant
+      - name: Record the published image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          SHORT: ${{ needs.release.outputs.short }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## qm-tenant $RELEASE_TAG"
+            echo
+            echo '```'
+            echo "$IMAGE@$DIGEST"
+            echo "$IMAGE:$RELEASE_TAG"
+            echo "$IMAGE:$RELEASE_TAG-$SHORT"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

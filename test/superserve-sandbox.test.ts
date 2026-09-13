@@ -403,3 +403,21 @@ test("no access token or key ever appears in exec scripts", async () => {
     assert.doesNotMatch(script, /ss_live_|X-Access-Token|access_token/);
   }
 });
+
+test("a sandbox is not cached when its durable record cannot be written", async () => {
+  const inner: DurableMap<StoredSuperserveSandbox> = createMemoryMap();
+  let failPuts = 1;
+  const store: DurableMap<StoredSuperserveSandbox> = {
+    ...inner,
+    put: async (key, value) => {
+      if (failPuts-- > 0) throw new Error("persistence unavailable");
+      return inner.put(key, value);
+    },
+  };
+  sandbox = make({ store });
+  await assert.rejects(sandbox.provision(layers), /persistence unavailable/);
+  const h = await sandbox.provision(layers);
+  assert.ok(await inner.get(scope), "record written on the retry");
+  assert.equal((await inner.get(scope))?.sandboxId, fake.current(scopeName())?.id);
+  assert.equal((await sandbox.run(h, "echo ok")).stdout.trim(), "ok");
+});

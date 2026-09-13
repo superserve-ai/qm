@@ -410,6 +410,20 @@ test("SANDBOX_BACKEND: unset defaults to local (dev only); the retired secondary
       loadConfig({ SANDBOX_BACKEND: "local", SUPERSERVE_API_KEY: "ss_live_k", SUPERSERVE_TEMPLATE: "qm-agent-1.0.0" }),
     ).includes("superserve"),
   );
+  assert.ok(
+    !enabledSandboxBackends(
+      loadConfig({ SANDBOX_BACKEND: "local", SUPERSERVE_API_KEY: "ss_live_k", SUPERSERVE_TEMPLATE: "   " }),
+    ).includes("superserve"),
+    "a blank template must not enable the secondary backend",
+  );
+  assert.equal(
+    loadConfig({
+      SANDBOX_BACKEND: "superserve",
+      SUPERSERVE_TEMPLATE: " qm-agent-1.0.0 ",
+      SUPERSERVE_API_KEY: "ss_live_k",
+    }).superserveSandbox?.template,
+    "qm-agent-1.0.0",
+  );
   const config = loadConfig({ SANDBOX_SECONDARY_BACKEND: "smolmachines" });
   assert.equal(config.sandboxBackend, "local");
   assert.ok(!("sandboxSecondaryBackend" in config));

@@ -158,9 +158,19 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     return session;
   }
 
-  async function adopt(name: string, session: SuperserveSession, knownHome?: string): Promise<Live> {
-    const homeDir = knownHome ?? (await detectHome(session));
+  async function adopt(
+    name: string,
+    session: SuperserveSession,
+    persist?: { scope: string; known?: StoredSuperserveSandbox },
+  ): Promise<Live> {
+    const homeDir = persist?.known?.homeDir ?? (await detectHome(session));
     const live: Live = { session, homeDir };
+    if (persist)
+      await store.put(persist.scope, {
+        sandboxId: session.id,
+        createdAtMs: persist.known?.createdAtMs ?? Date.now(),
+        homeDir,
+      });
     liveByName.set(name, live);
     return live;
   }
@@ -188,8 +198,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         if (stored) {
           try {
             const session = await reconnect(scope, stored.sandboxId);
-            const live = await adopt(name, session, stored.homeDir);
-            await store.merge(scope, { homeDir: live.homeDir });
+            const live = await adopt(name, session, { scope, known: stored });
             return { live, coldStart: false };
           } catch (err) {
             if (!(err instanceof SuperserveSandboxGoneError)) throw err;
@@ -201,12 +210,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         for (const summary of listed) {
           try {
             const session = await reconnect(scope, summary.id);
-            const live = await adopt(name, session);
-            await store.put(scope, {
-              sandboxId: session.id,
-              createdAtMs: Date.now(),
-              homeDir: live.homeDir,
-            });
+            const live = await adopt(name, session, { scope });
             return { live, coldStart: false };
           } catch (err) {
             if (!(err instanceof SuperserveSandboxGoneError)) throw err;
@@ -226,12 +230,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
           autoDeleteSeconds: retentionSec,
           ...(network ? { network } : {}),
         });
-        const live = await adopt(name, session);
-        await store.put(scope, {
-          sandboxId: session.id,
-          createdAtMs: Date.now(),
-          homeDir: live.homeDir,
-        });
+        const live = await adopt(name, session, { scope });
         return { live, coldStart: true };
       }),
     );

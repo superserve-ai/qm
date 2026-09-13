@@ -609,7 +609,7 @@ function superserveSandboxEnv(env: NodeJS.ProcessEnv): SuperserveSandboxEnv {
     ...(env.SUPERSERVE_API_KEY ? { apiKey: env.SUPERSERVE_API_KEY } : {}),
     ...(env.SUPERSERVE_BASE_URL?.trim() ? { baseUrl: env.SUPERSERVE_BASE_URL.trim() } : {}),
     ...(env.SUPERSERVE_NAME_PREFIX ? { namePrefix: env.SUPERSERVE_NAME_PREFIX } : {}),
-    ...(env.SUPERSERVE_TEMPLATE ? { template: env.SUPERSERVE_TEMPLATE } : {}),
+    ...(env.SUPERSERVE_TEMPLATE?.trim() ? { template: env.SUPERSERVE_TEMPLATE.trim() } : {}),
     ...(env.SUPERSERVE_HOME_DIR ? { homeDir: env.SUPERSERVE_HOME_DIR } : {}),
     ...(numEnvStrict("SUPERSERVE_IDLE_PAUSE_SEC", env.SUPERSERVE_IDLE_PAUSE_SEC) !== undefined
       ? { idlePauseSec: numEnvStrict("SUPERSERVE_IDLE_PAUSE_SEC", env.SUPERSERVE_IDLE_PAUSE_SEC) }

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
 import { Sandbox } from "@superserve/sdk";
+import { shq } from "../../src/util/shell.ts";
 import { requireRelease, findTemplateByName, fmtMs, resolveConnection, templateNameForRelease } from "./common.ts";
 
 const EXPECTED_TOOLS = [
@@ -36,7 +37,7 @@ const VERSION_COMMANDS: Record<string, string> = {
   "pip (PATH)": "pip --version",
   claude: "claude --version",
   codex: "codex --version",
-  gh: "gh --version | head -n1",
+  gh: "gh --version",
   aws: "aws --version",
   git: "git --version",
 };
@@ -84,10 +85,6 @@ async function run(sandbox: Sandbox, script: string): Promise<{ exitCode: number
   return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr };
 }
 
-function shq(s: string): string {
-  return `'${s.replace(/'/g, "'\\''")}'`;
-}
-
 async function main(): Promise<void> {
   const args = parseCli(process.argv.slice(2));
   const conn = resolveConnection(args.baseUrl);
@@ -116,10 +113,7 @@ async function main(): Promise<void> {
   });
   const tCreated = Date.now();
 
-  let released = false;
-  const release = async (): Promise<void> => {
-    if (released) return;
-    released = true;
+  const releaseOnce = async (): Promise<void> => {
     if (args.keep) {
       console.log(
         `[verify] keeping sandbox ${sandbox.id} (--keep; auto-deletes ${KEEP_AUTO_DELETE_SECONDS}s after it pauses)`,
@@ -136,6 +130,8 @@ async function main(): Promise<void> {
       );
     }
   };
+  let releasing: Promise<void> | undefined;
+  const release = (): Promise<void> => (releasing ??= releaseOnce());
   const onSignal = (signal: NodeJS.Signals): void => {
     console.error(`[verify] ${signal} received; releasing sandbox ${sandbox.id}`);
     void release().then(() => process.exit(SIGNAL_EXIT_CODES[signal] ?? 1));

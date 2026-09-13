@@ -8,14 +8,21 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const LOOPBACK_SHIM = pathToFileURL(join(ROOT, "scripts", "qm-tenant-loopback.mjs")).href;
 const env = process.env;
 
-const PUBLIC_PORT = intEnv("PORT", 8080);
-const CORE_PORT = intEnv("QM_CORE_PORT", 8081);
-const WEB_UI_PORT = intEnv("QM_WEB_UI_PORT", 8082);
-const BROKER_PORT = 8099;
-const READY_TIMEOUT_MS = intEnv("QM_READY_TIMEOUT_MS", 120_000);
-const DRAIN_MS = intEnv("SHUTDOWN_DRAIN_MS", 10_000);
+const MIN_PORT = 1;
+const MAX_PORT = 65535;
+const MAX_TIMER_MS = 2_147_483_647;
 const FAILURE_GRACE_MS = 3_000;
 const DRAIN_BACKSTOP_MS = 5_000;
+const LEASE_RELEASE_MS = 3_000;
+const KILL_MARGIN_MS = 1_000;
+const SHUTDOWN_BACKSTOP_MS = DRAIN_BACKSTOP_MS + LEASE_RELEASE_MS + KILL_MARGIN_MS;
+
+const PUBLIC_PORT = portEnv("PORT", 8080);
+const CORE_PORT = portEnv("QM_CORE_PORT", 8081);
+const WEB_UI_PORT = portEnv("QM_WEB_UI_PORT", 8082);
+const BROKER_PORT = 8099;
+const READY_TIMEOUT_MS = intEnv("QM_READY_TIMEOUT_MS", 120_000, 0, MAX_TIMER_MS);
+const DRAIN_MS = intEnv("SHUTDOWN_DRAIN_MS", 10_000, 0, MAX_TIMER_MS - SHUTDOWN_BACKSTOP_MS);
 
 const CORE_URL = `http://127.0.0.1:${CORE_PORT}`;
 const WEB_UI_URL = `http://127.0.0.1:${WEB_UI_PORT}`;
@@ -69,15 +76,19 @@ function warn(message) {
   console.error(`[tenant] ${message}`);
 }
 
-function intEnv(name, fallback) {
+function intEnv(name, fallback, min, max) {
   const raw = env[name];
   if (raw === undefined || raw.trim() === "") return fallback;
   const value = Number(raw);
-  if (!Number.isInteger(value) || value < 0) {
-    warn(`${name} must be a non-negative integer`);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    warn(`${name} must be an integer between ${min} and ${max}`);
     process.exit(2);
   }
   return value;
+}
+
+function portEnv(name, fallback) {
+  return intEnv(name, fallback, MIN_PORT, MAX_PORT);
 }
 
 function isSet(name) {
@@ -115,6 +126,10 @@ function authEmbedded() {
   return isSet("AUTH_SIGNING_JWK");
 }
 
+function adminEnabled() {
+  return env.ADMIN_ENABLED?.trim() !== "0";
+}
+
 function publicBase() {
   return env.PUBLIC_WEB_URL.trim().replace(/\/$/, "");
 }
@@ -133,9 +148,10 @@ function webUiEnv() {
     CORE_API_URL: CORE_URL,
     CORE_ORG_ID: env.ORG_ID,
     ADMIN_BASE_PATH: "/admin",
+    ADMIN_ENABLED: adminEnabled() ? "1" : "0",
     ...loopbackOptions(out),
   });
-  return withDefaults(out, { WEB_UI_PUBLIC_URL: publicBase(), ADMIN_ENABLED: "1" });
+  return withDefaults(out, { WEB_UI_PUBLIC_URL: publicBase() });
 }
 
 function portalEnv() {
@@ -147,14 +163,14 @@ function portalEnv() {
     CORE_ORG_ID: env.ORG_ID,
     WEB_UI_UPSTREAM: WEB_UI_URL,
   });
-  if (env.ADMIN_ENABLED?.trim() !== "0") out.ADMIN_UPSTREAM = `${WEB_UI_URL}/admin`;
+  if (adminEnabled()) out.ADMIN_UPSTREAM = `${WEB_UI_URL}/admin`;
   const defaults = { PORTAL_PUBLIC_URL: base };
   if (isSet("ORG_BRAND_SELF_LABEL")) defaults.AUTH_BRAND_NAME = env.ORG_BRAND_SELF_LABEL;
   if (authEmbedded()) {
     const issuer = `${base}/idp`;
     const broker = `http://127.0.0.1:${BROKER_PORT}`;
+    out.AUTH_EMBEDDED = "1";
     Object.assign(defaults, {
-      AUTH_EMBEDDED: "1",
       AUTH_BROKER_UPSTREAM: broker,
       AUTH_BROKER_PREFIX: "/idp",
       AUTH_ISSUER: issuer,
@@ -287,7 +303,7 @@ function finish() {
 
 function shutdown(signal) {
   log(`${signal} received; draining (SHUTDOWN_DRAIN_MS=${DRAIN_MS})`);
-  terminate(0, DRAIN_MS + DRAIN_BACKSTOP_MS + 1_000, true);
+  terminate(0, DRAIN_MS + SHUTDOWN_BACKSTOP_MS, true);
 }
 
 async function main() {
@@ -302,8 +318,13 @@ async function main() {
     );
     process.exit(2);
   }
-  if (new Set([PUBLIC_PORT, CORE_PORT, WEB_UI_PORT, BROKER_PORT]).size !== 4) {
-    warn(`PORT, QM_CORE_PORT, QM_WEB_UI_PORT and the broker port ${BROKER_PORT} must all differ`);
+  const embeddedAuth = authEmbedded();
+  const ports = embeddedAuth
+    ? [PUBLIC_PORT, CORE_PORT, WEB_UI_PORT, BROKER_PORT]
+    : [PUBLIC_PORT, CORE_PORT, WEB_UI_PORT];
+  if (new Set(ports).size !== ports.length) {
+    const names = `PORT, QM_CORE_PORT, QM_WEB_UI_PORT${embeddedAuth ? ` and the broker port ${BROKER_PORT}` : ""}`;
+    warn(`${names} must all differ`);
     process.exit(2);
   }
   process.on("SIGTERM", () => shutdown("SIGTERM"));
@@ -312,7 +333,7 @@ async function main() {
   const core = coreEnv();
   log(
     `tenant ${env.ORG_ID}: portal :${PUBLIC_PORT} (public), core 127.0.0.1:${CORE_PORT}, ` +
-      `web-ui 127.0.0.1:${WEB_UI_PORT}, embedded auth ${authEmbedded() ? "on" : "off"}`,
+      `web-ui 127.0.0.1:${WEB_UI_PORT}, embedded auth ${embeddedAuth ? "on" : "off"}`,
   );
 
   const migrated = await runToCompletion("migrate", ROOT, "src/migrate-main.ts", core);

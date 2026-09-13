@@ -45,6 +45,13 @@ Web-ui and portal receive an allowlisted subset of the environment (their own `W
 | `AUTH_EMBEDDED`       | no       | `1`/`0` forces the embedded sign-in broker on/off. Unset: on when `AUTH_SIGNING_JWK` is set. |
 | `ADMIN_ENABLED`       | no       | `0` disables the admin module in web-ui and drops portal's admin upstream. Default `1`.      |
 
+The three port variables must each be a TCP port between 1 and 65535 and must differ from one
+another; `8099` is reserved as well, but only while the embedded broker is running. The two
+millisecond variables must fit a Node timer, and `SHUTDOWN_DRAIN_MS` leaves room for the nine
+seconds the supervisor adds on top so core can finish its own drain backstop and release
+in-flight run leases. The supervisor rejects anything else at startup with exit code 2 rather
+than booting into a readiness timeout or killing core mid-drain.
+
 ### Shared identity and signing secrets
 
 | Variable                 | Required | Consumers            | Notes                                                                                         |
@@ -215,7 +222,7 @@ docker run --rm --name qm-tenant \
   --env-file deploy/superserve/.env qm-tenant:local
 ```
 
-The harness runs with `NODE_ENV=development` because portal refuses an http `PORTAL_PUBLIC_URL` in production; everything else matches the production wiring. `DATABASE_URL` in the example uses `host.docker.internal:55432`; `postgres:5432` also works on the compose network. MinIO needs the compose network because the SDK addresses the bucket virtual-host style as `qm-tenant.minio` (compose declares that alias; S3 bucket names must be at least three characters).
+The harness runs with `NODE_ENV=development` because portal refuses an http `PORTAL_PUBLIC_URL` in production; everything else matches the production wiring. `DATABASE_URL` in the example uses `postgres:5432` over the compose network, which resolves on every Docker engine; `host.docker.internal:55432` reaches the published port instead, but only where the daemon defines that name. MinIO needs the compose network because the SDK addresses the bucket virtual-host style as `qm-tenant.minio` (compose declares that alias; S3 bucket names must be at least three characters).
 
 Sign in as the admin named in `ADMIN_GRANTS`:
 

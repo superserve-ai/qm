@@ -68,7 +68,7 @@ export interface SuperserveClient {
   create(opts: SuperserveCreateOptions): Promise<SuperserveSession>;
   connect(sandboxId: string): Promise<SuperserveSession>;
   update(sandboxId: string, patch: SuperserveUpdate): Promise<void>;
-  info(sandboxId: string): Promise<SuperserveSandboxInfo>;
+  info(sandboxId: string, scopeMetadata?: Record<string, string>): Promise<SuperserveSandboxInfo>;
   list(metadata: Record<string, string>): Promise<SuperserveSandboxSummary[]>;
   kill(sandboxId: string): Promise<void>;
 }
@@ -257,10 +257,11 @@ export function createSdkSuperserveClient(opts: SdkSuperserveClientOptions): Sup
         throw err;
       }
     },
-    async info(sandboxId): Promise<SuperserveSandboxInfo> {
+    async info(sandboxId, scopeMetadata): Promise<SuperserveSandboxInfo> {
       const { Sandbox } = await loadSdk();
+      const scoped = scopeMetadata && Object.keys(scopeMetadata).length ? scopeMetadata : undefined;
       try {
-        const listed = await Sandbox.list({ ...connection });
+        const listed = await Sandbox.list({ ...connection, ...(scoped ? { metadata: scoped } : {}) });
         const hit = listed.find((s) => s.id === sandboxId);
         if (!hit || GONE_STATES.has(hit.status)) throw new SuperserveSandboxGoneError(sandboxId, "not listed");
         return toInfo(hit);

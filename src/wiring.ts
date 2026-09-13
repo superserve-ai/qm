@@ -884,6 +884,7 @@ export function buildApp(
     if (!ss.apiKey) throw new Error("SANDBOX_BACKEND=superserve requires SUPERSERVE_API_KEY");
     if (!ss.template)
       throw new Error("SANDBOX_BACKEND=superserve requires SUPERSERVE_TEMPLATE (a ready qm-agent-<release> template)");
+    const keepWarmSec = Math.ceil(config.backgroundJobTtlMaxMs / 1000);
     const generationKey = createHash("sha256")
       .update(
         JSON.stringify([
@@ -893,6 +894,7 @@ export function buildApp(
           ss.homeDir ?? "",
           ss.idlePauseSec ?? null,
           ss.retentionSec ?? null,
+          keepWarmSec,
           [...(ss.egressAllow ?? [])].sort(),
           [...(ss.egressDeny ?? [])].sort(),
         ]),
@@ -900,7 +902,7 @@ export function buildApp(
       .digest("hex")
       .slice(0, 32);
     return createSuperserveSandbox(workspace, {
-      configEpoch: createConfigEpochResolver(superserveEpochs, generationKey, advisoryLock),
+      configEpoch: ss.configGeneration ?? createConfigEpochResolver(superserveEpochs, generationKey, advisoryLock),
       client: createSdkSuperserveClient({
         apiKey: ss.apiKey,
         ...(ss.baseUrl ? { baseUrl: ss.baseUrl } : {}),
@@ -910,7 +912,7 @@ export function buildApp(
       template: ss.template,
       ...(ss.homeDir ? { homeDir: ss.homeDir } : {}),
       ...(ss.idlePauseSec !== undefined ? { idlePauseSec: ss.idlePauseSec } : {}),
-      keepWarmSec: Math.ceil(config.backgroundJobTtlMaxMs / 1000),
+      keepWarmSec,
       ...(ss.retentionSec !== undefined ? { retentionSec: ss.retentionSec } : {}),
       ...(ss.egressAllow ? { egressAllow: ss.egressAllow } : {}),
       ...(ss.egressDeny ? { egressDeny: ss.egressDeny } : {}),

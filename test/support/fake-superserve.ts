@@ -182,9 +182,10 @@ export function installFakeSuperserve(): FakeSuperserve {
       alive(r);
       return session(r);
     },
-    async info(sandboxId): Promise<SuperserveSandboxInfo> {
+    async info(sandboxId, scopeMetadata): Promise<SuperserveSandboxInfo> {
       const r = records.get(sandboxId);
-      if (!r || r.expired) throw new SuperserveSandboxGoneError(sandboxId, "sandbox was not found");
+      const matches = Object.entries(scopeMetadata ?? {}).every(([k, v]) => r?.metadata[k] === v);
+      if (!r || r.expired || !matches) throw new SuperserveSandboxGoneError(sandboxId, "sandbox was not found");
       return info(r);
     },
     async list(metadata): Promise<SuperserveSandboxInfo[]> {

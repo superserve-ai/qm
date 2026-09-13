@@ -592,6 +592,7 @@ interface SuperserveSandboxEnv {
   egressAllow?: string[];
   egressDeny?: string[];
   defaultTimeoutSec?: number;
+  configGeneration?: number;
 }
 
 const csvList = (value: string | undefined): string[] | undefined => {
@@ -621,6 +622,9 @@ function superserveSandboxEnv(env: NodeJS.ProcessEnv): SuperserveSandboxEnv {
     ...(egressDeny ? { egressDeny } : {}),
     ...(numEnvStrict("SANDBOX_TIMEOUT_SEC", env.SANDBOX_TIMEOUT_SEC) !== undefined
       ? { defaultTimeoutSec: numEnvStrict("SANDBOX_TIMEOUT_SEC", env.SANDBOX_TIMEOUT_SEC) }
+      : {}),
+    ...(numEnvStrict("SUPERSERVE_CONFIG_GENERATION", env.SUPERSERVE_CONFIG_GENERATION) !== undefined
+      ? { configGeneration: numEnvStrict("SUPERSERVE_CONFIG_GENERATION", env.SUPERSERVE_CONFIG_GENERATION) }
       : {}),
   };
 }

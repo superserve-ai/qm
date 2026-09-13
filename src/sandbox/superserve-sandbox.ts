@@ -180,6 +180,8 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     ...(opts.template ? { [SUPERSERVE_METADATA.template]: opts.template } : {}),
   });
 
+  const scopeFilter = (name: string): Record<string, string> => ({ [SUPERSERVE_METADATA.scope]: name });
+
   const dropLive = (name: string, sandboxId: string): void => {
     if (liveByName.get(name)?.session.id === sandboxId) liveByName.delete(name);
   };
@@ -195,9 +197,10 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
 
   async function reconnect(
     scope: string,
+    name: string,
     sandboxId: string,
   ): Promise<{ session: SuperserveSession; current: boolean }> {
-    const info = await client.info(sandboxId);
+    const info = await client.info(sandboxId, scopeFilter(name));
     const stampedEpoch = Number(info.metadata[SUPERSERVE_METADATA.epoch] ?? 0);
     if (stampedEpoch > (await configEpoch())) return { session: await client.connect(sandboxId), current: false };
     if (opts.template && info.metadata[SUPERSERVE_METADATA.template] !== opts.template) {
@@ -251,7 +254,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         const cached = liveByName.get(name);
         if (cached) {
           try {
-            const info = await client.info(cached.session.id);
+            const info = await client.info(cached.session.id, scopeFilter(name));
             cached.current = Number(info.metadata[SUPERSERVE_METADATA.epoch] ?? 0) <= (await configEpoch());
             return { live: cached, coldStart: false };
           } catch (err) {
@@ -264,7 +267,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         const stored = await store.get(scope);
         if (stored) {
           try {
-            const { session, current } = await reconnect(scope, stored.sandboxId);
+            const { session, current } = await reconnect(scope, name, stored.sandboxId);
             const live = await adopt(name, session, { scope, known: stored }, current);
             return { live, coldStart: false };
           } catch (err) {
@@ -276,7 +279,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         const listed = await client.list({ [SUPERSERVE_METADATA.scope]: name });
         for (const summary of listed) {
           try {
-            const { session, current } = await reconnect(scope, summary.id);
+            const { session, current } = await reconnect(scope, name, summary.id);
             const live = await adopt(name, session, { scope }, current);
             return { live, coldStart: false };
           } catch (err) {
@@ -570,7 +573,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       const recovery = { strategy: "provider_pause" as const };
       let inspectedId = stored.sandboxId;
       try {
-        const info = await client.info(stored.sandboxId);
+        const info = await client.info(stored.sandboxId, scopeFilter(name));
         if (info.status === "paused" || info.status === "pausing")
           return {
             machine,
@@ -634,13 +637,18 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     if (tdOpts?.destroy) return advisoryLock.withLock(lockKey(scope), () => destroyStoredScope(scope));
     const live = liveByName.get(name);
     if (!live?.current) return;
-    try {
-      await live.session.update({ timeoutSeconds: tdOpts?.keepWarm ? keepWarmSec : idlePauseSec });
-    } catch (err) {
-      if (!(err instanceof SuperserveSandboxGoneError)) throw err;
-      dropLive(name, live.session.id);
-      await forget(scope, live.session.id);
-    }
+    return advisoryLock.withLock(lockKey(scope), async () => {
+      try {
+        const info = await client.info(live.session.id, scopeFilter(name));
+        live.current = Number(info.metadata[SUPERSERVE_METADATA.epoch] ?? 0) <= (await configEpoch());
+        if (!live.current) return;
+        await live.session.update({ timeoutSeconds: tdOpts?.keepWarm ? keepWarmSec : idlePauseSec });
+      } catch (err) {
+        if (!(err instanceof SuperserveSandboxGoneError)) throw err;
+        dropLive(name, live.session.id);
+        await forget(scope, live.session.id);
+      }
+    });
   }
 
   return sandbox;

@@ -405,6 +405,26 @@ test("SANDBOX_BACKEND: unset defaults to local (dev only); the retired secondary
       SANDBOX_BACKEND: "superserve",
       SUPERSERVE_TEMPLATE: "qm-agent-1.0.0",
       SUPERSERVE_API_KEY: "ss_live_k",
+      SUPERSERVE_CONFIG_GENERATION: "7",
+    }).superserveSandbox.configGeneration,
+    7,
+    "a deployment that tracks its own rollouts stamps the generation its sandboxes carry",
+  );
+  assert.throws(
+    () =>
+      loadConfig({
+        SANDBOX_BACKEND: "superserve",
+        SUPERSERVE_TEMPLATE: "qm-agent-1.0.0",
+        SUPERSERVE_API_KEY: "ss_live_k",
+        SUPERSERVE_CONFIG_GENERATION: "later",
+      }),
+    /SUPERSERVE_CONFIG_GENERATION/,
+  );
+  assert.equal(
+    loadConfig({
+      SANDBOX_BACKEND: "superserve",
+      SUPERSERVE_TEMPLATE: "qm-agent-1.0.0",
+      SUPERSERVE_API_KEY: "ss_live_k",
     }).sandboxBackend,
     "superserve",
   );

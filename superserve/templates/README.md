@@ -76,7 +76,7 @@ The verifier boots a throwaway sandbox from the template, measures cold boot to 
 prints `$HOME`, `whoami`, `uname -a`, `PATH`, runs a `command -v` inventory of every expected
 tool plus `--version` for each CLI, checks that `timeout` and the venv behave the way the
 backend expects, then kills the sandbox. An interrupt (Ctrl-C or `SIGTERM`) kills it on the
-way out too, so a cancelled run does not leave compute billing. `--keep` leaves the sandbox
-running for inspection and arms a one-hour auto-delete window instead of killing it; without
+way out too, so a cancelled run does not leave a sandbox running and billing. `--keep` keeps it
+alive for inspection and arms a one-hour auto-delete window instead of killing it; without
 `--keep` the sandbox is also configured to delete itself the moment it pauses, so even a
 `SIGKILL`ed verifier cannot strand it. It exits non-zero if any expected tool is missing.

@@ -294,6 +294,8 @@ test("a sandbox lost mid-session fails the command and is replaced by the next p
   const h = await sandbox.provision(layers);
   fake.expire(scopeName());
   await assert.rejects(sandbox.run(h, "echo back"), /is gone/);
+  await assert.rejects(sandbox.run(h, "echo again"), /provision it again/);
+  await assert.rejects(sandbox.readFile(h, "x.txt"), /provision it again/);
   assert.equal(fake.createdCount(scopeName()), 1);
   assert.equal(await store.get(scope), null);
 

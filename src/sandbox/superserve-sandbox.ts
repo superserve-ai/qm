@@ -260,13 +260,10 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
   }
 
   async function withLive<T>(name: string, action: (live: Live) => Promise<T>): Promise<T> {
-    const scratchKey = scratchKeyByName.get(name);
-    const acquire = async (): Promise<Live> =>
-      scratchKey !== undefined
-        ? (liveByName.get(name) ?? (await createScratch(name)))
-        : (liveByName.get(name) ?? (await ensureLive(scopeByName.get(name) ?? "default", name)).live);
+    const live = liveByName.get(name);
+    if (!live) throw new Error(`superserve sandbox for ${name} is gone; provision it again before using this handle`);
     try {
-      return await action(await acquire());
+      return await action(live);
     } catch (err) {
       if (!(err instanceof SuperserveSandboxGoneError)) throw err;
       liveByName.delete(name);

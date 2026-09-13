@@ -241,6 +241,17 @@ test("teardown leaves the sandbox to the provider's idle pause; a paused sandbox
   assert.equal(fake.current(scopeName())?.status, "active");
 });
 
+test("keepWarm teardown extends the provider idle pause; a plain teardown restores it", async () => {
+  sandbox = make({ idlePauseSec: 600, keepWarmSec: 5400 });
+  const h = await sandbox.provision(layers);
+  assert.equal(fake.current(scopeName())?.timeoutSeconds, 600);
+  await sandbox.teardown(h, { keepWarm: true });
+  assert.equal(fake.current(scopeName())?.timeoutSeconds, 5400);
+  assert.equal(fake.current(scopeName())?.status, "active");
+  await sandbox.teardown(h);
+  assert.equal(fake.current(scopeName())?.timeoutSeconds, 600);
+});
+
 test("a concurrent handle keeps working after another handle's teardown", async () => {
   const a = await sandbox.provision(layers);
   const b = await sandbox.provision(layers);

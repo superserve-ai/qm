@@ -49,6 +49,7 @@ const WORKSPACE_BASENAME = "workspace";
 const RO_LAYERS_TAR = ".ro-layers.tar";
 const RO_LAYERS_MANIFEST = ".ro-layers.manifest";
 const DEFAULT_IDLE_PAUSE_SEC = 15 * 60;
+const DEFAULT_KEEP_WARM_SEC = 3600;
 const DEFAULT_RETENTION_SEC = 30 * 24 * 3600;
 const SCRATCH_IDLE_PAUSE_SEC = 10 * 60;
 const SCRATCH_RETENTION_SEC = 24 * 3600;
@@ -77,6 +78,7 @@ export interface SuperserveSandboxOptions extends BlobStagingOptions {
   template?: string;
   homeDir?: string;
   idlePauseSec?: number;
+  keepWarmSec?: number;
   retentionSec?: number;
   egressAllow?: string[];
   egressDeny?: string[];
@@ -98,6 +100,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
   const defaultTimeoutSec = opts.defaultTimeoutSec ?? 600;
   const configuredHome = opts.homeDir ?? DEFAULT_HOME_DIR;
   const idlePauseSec = opts.idlePauseSec ?? DEFAULT_IDLE_PAUSE_SEC;
+  const keepWarmSec = Math.max(opts.keepWarmSec ?? DEFAULT_KEEP_WARM_SEC, idlePauseSec);
   const retentionSec = opts.retentionSec ?? DEFAULT_RETENTION_SEC;
   const network: SuperserveNetwork | undefined =
     opts.egressAllow?.length || opts.egressDeny?.length
@@ -542,12 +545,21 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       }
       if (tdOpts?.destroy && !scopeByName.has(handle.id)) return;
       const scope = scopeByName.get(handle.id) ?? "default";
-      return provisionQueue(scope, () => teardownScope(scope, tdOpts));
+      return provisionQueue(scope, () => teardownScope(handle.id, scope, tdOpts));
     },
   };
 
-  async function teardownScope(scope: string, tdOpts?: TeardownOptions): Promise<void> {
-    if (tdOpts?.destroy) await advisoryLock.withLock(lockKey(scope), () => destroyStoredScope(scope));
+  async function teardownScope(name: string, scope: string, tdOpts?: TeardownOptions): Promise<void> {
+    if (tdOpts?.destroy) return advisoryLock.withLock(lockKey(scope), () => destroyStoredScope(scope));
+    const live = liveByName.get(name);
+    if (!live) return;
+    try {
+      await live.session.update({ timeoutSeconds: tdOpts?.keepWarm ? keepWarmSec : idlePauseSec });
+    } catch (err) {
+      if (!(err instanceof SuperserveSandboxGoneError)) throw err;
+      liveByName.delete(name);
+      await store.delete(scope);
+    }
   }
 
   return sandbox;

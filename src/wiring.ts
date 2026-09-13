@@ -888,6 +888,7 @@ export function buildApp(
       template: ss.template,
       ...(ss.homeDir ? { homeDir: ss.homeDir } : {}),
       ...(ss.idlePauseSec !== undefined ? { idlePauseSec: ss.idlePauseSec } : {}),
+      keepWarmSec: Math.ceil(config.backgroundJobTtlMaxMs / 1000),
       ...(ss.retentionSec !== undefined ? { retentionSec: ss.retentionSec } : {}),
       ...(ss.egressAllow ? { egressAllow: ss.egressAllow } : {}),
       ...(ss.egressDeny ? { egressDeny: ss.egressDeny } : {}),

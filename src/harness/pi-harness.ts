@@ -1,5 +1,6 @@
+import { gatewayModelsJson, gatewayModelsVersion } from "../model/gateway-models.ts";
 import { Type } from "typebox";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -7,6 +8,7 @@ import {
   DefaultResourceLoader,
   ModelRuntime,
   SessionManager,
+  SettingsManager,
   type AgentSession,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -386,6 +388,7 @@ async function directAnthropicJson(
       .includes("anthropic")
   )
     return undefined;
+  await modelGateway?.refresh?.();
   const gateway = modelGatewayRequest(modelGateway, model);
   const requestModel = gateway?.model ?? model;
   const requestKey = gateway?.apiKey ?? apiKey;
@@ -442,6 +445,7 @@ interface TurnSession {
   composedPromptTokens: number;
   cwd: string;
   agentDir: string;
+  ephemeralCwd?: string;
 }
 
 interface PerCallStat {
@@ -645,8 +649,10 @@ function sumCacheUsage(
 
 interface IsolatedResources {
   resourceLoader: DefaultResourceLoader;
+  settingsManager: SettingsManager;
   cwd: string;
   agentDir: string;
+  ephemeralCwd?: string;
 }
 
 const MAX_CAPTURED_PAYLOAD_CHARS = 2_000_000;
@@ -1072,13 +1078,29 @@ export function wallClockTurnFailure(
   return !cancelAborted || wallClock === "abandoned";
 }
 
+export function stableCwd(prefix: string): string {
+  return join(tmpdir(), `${prefix}-cwd`);
+}
+
 async function createIsolatedResources(prefix: string, systemPrompt: string): Promise<IsolatedResources> {
-  const cwd = mkdtempSync(join(tmpdir(), `${prefix}-cwd-`));
+  let cwd = stableCwd(prefix);
+  let ephemeralCwd: string | undefined;
+  try {
+    mkdirSync(cwd, { recursive: true });
+    if (!statSync(cwd).isDirectory()) throw new Error(`${cwd} is not a directory`);
+  } catch (e) {
+    swallow("pi: shared cwd unavailable; using a per-turn cwd (prompt cache prefix changes)", e);
+    cwd = mkdtempSync(join(tmpdir(), `${prefix}-cwd-`));
+    ephemeralCwd = cwd;
+  }
   const agentDir = mkdtempSync(join(tmpdir(), `${prefix}-agent-`));
+  const settingsManager = SettingsManager.inMemory({}, { projectTrusted: false });
   const resourceLoader = new DefaultResourceLoader({
     cwd,
     agentDir,
+    settingsManager,
     systemPrompt,
+    appendSystemPrompt: [],
     noExtensions: true,
     noSkills: true,
     noPromptTemplates: true,
@@ -1086,11 +1108,12 @@ async function createIsolatedResources(prefix: string, systemPrompt: string): Pr
     noContextFiles: true,
   });
   await resourceLoader.reload();
-  return { resourceLoader, cwd, agentDir };
+  return { resourceLoader, settingsManager, cwd, agentDir, ...(ephemeralCwd ? { ephemeralCwd } : {}) };
 }
 
-function removeIsolatedDirs(dirs: { cwd: string; agentDir: string }): void {
-  for (const dir of [dirs.cwd, dirs.agentDir]) {
+function removeIsolatedDirs(dirs: { agentDir: string; ephemeralCwd?: string }): void {
+  for (const dir of [dirs.agentDir, dirs.ephemeralCwd]) {
+    if (!dir) continue;
     try {
       rmSync(dir, { recursive: true, force: true });
     } catch (e) {
@@ -1112,9 +1135,10 @@ export interface ProviderKeys {
 // version instead of leaking a temp dir per turn.
 let cachedCustomModels: { version: number; path: string | null } | null = null;
 function customModelsPath(): string | null {
-  const version = customProvidersVersion();
+  const version = customProvidersVersion() + gatewayModelsVersion();
   if (cachedCustomModels?.version === version) return cachedCustomModels.path;
-  const custom = customModelsJson();
+  const providers = { ...customModelsJson()?.providers, ...gatewayModelsJson() };
+  const custom = Object.keys(providers).length ? { providers } : undefined;
   let path: string | null = null;
   if (custom) {
     path = join(mkdtempSync(join(tmpdir(), "pi-custom-models-")), "models.json");
@@ -1129,6 +1153,7 @@ async function buildModelRuntime(
   modelGateway?: ModelGatewayTransportConfig,
   cacheRetention?: "long",
 ): Promise<ModelRuntime> {
+  await modelGateway?.refresh?.();
   const k: ProviderKeys = typeof keys === "string" ? { anthropic: keys } : keys;
   // Custom providers must exist in the runtime's own registry — a runtime
   // API key alone is invisible to its availability checks. models.json is
@@ -1185,7 +1210,10 @@ async function buildModelRuntime(
         if (!body || typeof body !== "object" || Array.isArray(body)) {
           throw new Error("model gateway request payload must be an object");
         }
-        return { ...body, model: request.target };
+        await modelGateway?.refresh?.();
+        const current = modelGatewayRequest(modelGateway, model);
+        if (!current) throw new Error(`Gateway model is unavailable: ${model.id}`);
+        return { ...body, model: current.target };
       },
     } as unknown as ModelsApiStreamOptions<TApi>;
     return stream(request.model, context, routedOptions);
@@ -1207,7 +1235,10 @@ async function buildModelRuntime(
         if (!body || typeof body !== "object" || Array.isArray(body)) {
           throw new Error("model gateway request payload must be an object");
         }
-        return { ...body, model: request.target };
+        await modelGateway?.refresh?.();
+        const current = modelGatewayRequest(modelGateway, model);
+        if (!current) throw new Error(`Gateway model is unavailable: ${model.id}`);
+        return { ...body, model: current.target };
       },
     } as ModelsSimpleStreamOptions;
     return streamSimple(request.model, context, routedOptions);
@@ -1224,12 +1255,16 @@ export async function oneShot(
   opts?: { signal?: AbortSignal; modelGateway?: ModelGatewayTransportConfig },
 ): Promise<string | undefined> {
   const modelRuntime = await buildModelRuntime(keys, opts?.modelGateway);
-  const { resourceLoader, cwd, agentDir } = await createIsolatedResources(prefix, systemPrompt);
+  const { resourceLoader, settingsManager, cwd, agentDir, ephemeralCwd } = await createIsolatedResources(
+    prefix,
+    systemPrompt,
+  );
   try {
     const { session } = await createAgentSession({
       model,
       modelRuntime,
       resourceLoader,
+      settingsManager,
       customTools: [],
       noTools: "builtin",
       sessionManager: SessionManager.inMemory(),
@@ -1251,8 +1286,7 @@ export async function oneShot(
     }
     return piLastAssistantTextOrThrow(session);
   } finally {
-    rmSync(cwd, { recursive: true, force: true });
-    rmSync(agentDir, { recursive: true, force: true });
+    removeIsolatedDirs({ agentDir, ephemeralCwd });
   }
 }
 
@@ -1495,6 +1529,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
     tapeFold?: unknown[],
     tape?: HarnessTurnInput["tape"],
     turnProviderKeys?: ProviderKeys,
+    sessionTools = false,
   ): Promise<{ entry: TurnSession; compileMs: number }> {
     const compileStart = Date.now();
     let reconstructed: PiReplayMessage[] | null;
@@ -1533,7 +1568,10 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
       systemCacheSplit ? "long" : undefined,
     );
     const ref: ToolContextRef = { current: null };
-    const { resourceLoader, cwd, agentDir } = await createIsolatedResources(tempDirPrefix, composedPrompt);
+    const { resourceLoader, settingsManager, cwd, agentDir, ephemeralCwd } = await createIsolatedResources(
+      tempDirPrefix,
+      composedPrompt,
+    );
     const compileMs = Date.now() - compileStart;
 
     let session: AgentSession;
@@ -1542,7 +1580,9 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
         model,
         modelRuntime,
         resourceLoader,
+        settingsManager,
         customTools: createAgentTools(ref, {
+          sessionTools,
           scratchExec,
           ownerAuthExec,
           reachExec,
@@ -1565,7 +1605,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
         agentDir,
       }));
     } catch (err) {
-      removeIsolatedDirs({ cwd, agentDir });
+      removeIsolatedDirs({ agentDir, ephemeralCwd });
       throw err;
     }
 
@@ -1592,7 +1632,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
             scopeLabel: turnScope!,
           });
         } catch (err) {
-          removeIsolatedDirs({ cwd, agentDir });
+          removeIsolatedDirs({ agentDir, ephemeralCwd });
           throw err;
         }
       }
@@ -1673,6 +1713,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
       composedPromptTokens: countTokens(composedPrompt),
       cwd,
       agentDir,
+      ...(ephemeralCwd ? { ephemeralCwd } : {}),
     };
     return { entry, compileMs };
   }
@@ -1717,6 +1758,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
           turn.tapeFold,
           turn.tape,
           turn.providerKeys,
+          Boolean(turn.tools.sessionSyscalls),
         );
         try {
           const turnWallClockMs = turn.turnWallClockMs ?? defaultTurnWallClockMs;
@@ -2302,7 +2344,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
             }
             const finalEntry = await turn.emit({
               type: "assistant",
-              payload: { text: reply },
+              payload: { text: reply, stopped: true },
               scopeLabel: turn.scopeLabel,
             });
             const stoppedPartial = stoppedPartialTapeMessage(freshMessages, reply, finalEntry.createdAt);

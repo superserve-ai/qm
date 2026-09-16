@@ -33,7 +33,8 @@
         "scripts/skills-materialize-smoke.ts",
         "scripts/slack-user-token.ts",
         "superserve/templates/qm-agent.ts",
-        "superserve/templates/verify-qm-agent.ts"
+        "superserve/templates/verify-qm-agent.ts",
+        "docs/qa/resource-search-demo.mjs"
       ]
     },
     "cli": {
@@ -61,6 +62,9 @@
         "hljs-real-sql",
         "hljs-real-markdown"
       ]
+    },
+    "deploy/connector-sdk": {
+      "ignoreDependencies": ["@composio/core"]
     }
   }
 }

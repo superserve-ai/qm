@@ -957,6 +957,27 @@ test("superserve backend requires the agent template in env.core", () => {
       assert.deepEqual(sandboxCoreEnv(config), { env: { SANDBOX_BACKEND: "superserve" }, missingSecrets: [] });
     },
   );
+  withConfig(
+    {
+      sandbox: { backend: "local" },
+      env: { core: { SANDBOX_SCOPE_BACKENDS: JSON.stringify({ personal: "superserve" }) } },
+    },
+    ({ path }) => {
+      assert.throws(() => loadConfigAt(path), /superserve sandbox backend requires env.core.SUPERSERVE_TEMPLATE/);
+    },
+  );
+  withConfig(
+    {
+      sandbox: { backend: "local" },
+      env: {
+        core: {
+          SANDBOX_SCOPE_BACKENDS: JSON.stringify({ personal: "superserve" }),
+          SUPERSERVE_TEMPLATE: "qm-agent-1.0.0",
+        },
+      },
+    },
+    ({ path }) => assert.doesNotThrow(() => loadConfigAt(path)),
+  );
 });
 
 test("env.core.SANDBOX_BACKEND decides the effective backend, because every target layers env.core over the sandbox block", () => {

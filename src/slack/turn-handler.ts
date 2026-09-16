@@ -1,3 +1,5 @@
+import type { SlackRateLimitNotice } from "./rate-limit-notice.ts";
+import type { SlackHistoryReader } from "./history.ts";
 import { performance } from "node:perf_hooks";
 import { slackFailureText } from "./turn-flow.ts";
 import { errMessage, swallowAs } from "../util/errors.ts";
@@ -81,7 +83,9 @@ interface Incoming {
   userId: string | undefined;
   actor?: ActorAssertion;
   authorName?: string;
+  botId?: string;
   rawText: string;
+  subtype?: string;
   files: SlackFile[];
   threadTs?: string;
   ts: string;
@@ -106,7 +110,7 @@ export interface TurnHandler {
   handleIncoming(inc: Incoming, client: any): Promise<void>;
   dispatch(key: string, inc: Incoming, client: any): Promise<void>;
   handleReactionEvent(evt: SlackReactionEvent, eventId: string | undefined, client: any, added: boolean): Promise<void>;
-  botHasStakeInThread(client: any, channel: string, threadTs: string): Promise<boolean>;
+  botHasStakeInThread(client: any, channel: string, threadTs: string, before?: string): Promise<boolean>;
 }
 
 function channelType(kind: SlackConversationKind, conversationKind: SlackConversationKind): string {
@@ -124,10 +128,12 @@ function channelLocation(
 }
 
 export function createTurnHandler(deps: {
+  rateLimitNotice?: SlackRateLimitNotice;
   core: SlackCoreClient;
   flow: TurnFlow;
   directory: Directory;
   mirror: Mirror;
+  readHistory?: SlackHistoryReader;
   serializer: ConversationSerializer;
   approvals: Approvals;
   ackEmoji: AckEmojiPicker;
@@ -162,17 +168,31 @@ export function createTurnHandler(deps: {
     externalParticipantsEnabled,
   } = deps;
   const { classifyUserCached, classifyActor, getChannelInfo, channelMembership } = directory;
-  const { mirrorSelfPost, mirrorMessageEvent } = mirror;
+  const { mirrorMessageEvent } = mirror;
   const { callCore, inFlightRuns, inFlightRunByThread, ackRunDelivery } = flow;
 
   const reactionsInFlight = new Set<string>();
 
-  async function botHasStakeInThread(client: any, channel: string, threadTs: string): Promise<boolean> {
+  async function botHasStakeInThread(
+    client: any,
+    channel: string,
+    threadTs: string,
+    before?: string,
+  ): Promise<boolean> {
     const cached = threads.get(channel, threadTs);
     if (cached !== undefined) return cached;
     try {
-      const res = await client.conversations.replies({ channel, ts: threadTs, limit: 200 });
-      const present = threadHasBotStake(res.messages ?? [], ids.botUserId, ids.ownBotId);
+      const messages = deps.readHistory
+        ? (await deps.readHistory(client, channel, threadTs, before)).raw
+        : ((
+            await client.conversations.replies({
+              channel,
+              ts: threadTs,
+              limit: 200,
+              ...(before ? { latest: before, inclusive: false } : {}),
+            })
+          ).messages ?? []);
+      const present = threadHasBotStake(messages, ids.botUserId, ids.ownBotId);
       threads.mark(channel, threadTs, present);
       return present;
     } catch {
@@ -224,16 +244,12 @@ export function createTurnHandler(deps: {
       });
       if (idempotencyKey) {
         const res = await postWithVerify(client, replyArgs(msg, true) as PostMessageArgs, idempotencyKey);
-        for (const part of res.parts ?? [{ ts: res.ts, text: msg }]) {
-          mirrorSelfPost(inc.channel, part.ts, part.text, { sub: replyThreadTs });
-        }
         return res.ts;
       }
       const parts = blocks ? [msg] : safeChunks(msg, SLACK_POST_SPLIT_LIMIT);
       let firstTs: string | undefined;
       for (const [i, part] of parts.entries()) {
         const ts = (await client.chat.postMessage(replyArgs(part, parts.length === 1))).ts as string | undefined;
-        mirrorSelfPost(inc.channel, ts, part, { sub: replyThreadTs });
         if (i === 0) firstTs = ts;
       }
       return firstTs;
@@ -366,9 +382,7 @@ export function createTurnHandler(deps: {
               ...(metadata ? { metadata } : {}),
               ...botIdentityArgs(),
             })
-            .then(() => {
-              mirrorSelfPost(inc.channel, ts, text, { sub: replyThreadTs, editedAt: Date.now() });
-            }),
+            .then(() => {}),
         checkpoint: async (ts) => {
           if (queuedRunId) await core.reportRunEditRef(queuedRunId, ts);
         },
@@ -381,9 +395,7 @@ export function createTurnHandler(deps: {
       goalNotice = createGoalNoticePresenter({
         post: (text, blocks) => postReply(text, blocks),
         update: (ts, text, blocks) =>
-          client.chat.update({ channel: inc.channel, ts, text, blocks, ...botIdentityArgs() }).then(() => {
-            mirrorSelfPost(inc.channel, ts, text, { sub: replyThreadTs, editedAt: Date.now() });
-          }),
+          client.chat.update({ channel: inc.channel, ts, text, blocks, ...botIdentityArgs() }).then(() => {}),
         onError: (error) => console.error("[slack-plugin] goal notice update failed:", (error as Error).message),
       });
     }
@@ -391,19 +403,24 @@ export function createTurnHandler(deps: {
       await ack?.settle().catch(swallowAs("slack: ack settle", undefined));
     };
 
-    {
+    if (!inc.synthetic) {
       const containerName = inc.kind === "dm" ? actor.displayName?.trim() || undefined : channelName;
-      void mirrorMessageEvent(
+      await mirrorMessageEvent(
         {
           channel: inc.channel,
           ts: inc.ts,
           text: inc.rawText,
+          subtype: inc.subtype,
+          files: inc.files,
           user: inc.userId,
+          bot_id: inc.botId,
+          username: inc.authorName,
+          ...(inc.botAuthored ? { bot_profile: { name: inc.authorName } } : {}),
           thread_ts: inc.threadTs,
           channel_type: channelType(inc.kind, conversationKind),
         },
         client,
-        { kind: conversationKind, handled: true, ...(containerName ? { containerName } : {}) },
+        { partial: true, kind: conversationKind, handled: true, ...(containerName ? { containerName } : {}) },
       );
     }
 
@@ -414,16 +431,24 @@ export function createTurnHandler(deps: {
     let overheard: OverheardMessage[] | undefined;
     let detectContext: string | undefined;
     let detectOpener: string | undefined;
-    let earlierFiles: SlackFile[] = [];
     if (inc.kind === "channel" || (inc.kind === "dm" && inc.threadTs)) {
-      const serialized = await serializer.serializeSlackConversation(client, inc, {
-        audience,
-        ...(channelName ? { channelName } : {}),
-        ...(isPrivate !== undefined ? { isPrivate } : {}),
-        kind: conversationKind,
-        ...(slackIdsByPrincipal ? { slackIdsByPrincipal } : {}),
-      });
-      earlierFiles = serialized.earlierFiles;
+      const serialize = () =>
+        serializer.serializeSlackConversation(client, inc, {
+          audience,
+          ...(channelName ? { channelName } : {}),
+          ...(isPrivate !== undefined ? { isPrivate } : {}),
+          kind: conversationKind,
+          ...(slackIdsByPrincipal ? { slackIdsByPrincipal } : {}),
+        });
+      const serialized = deps.rateLimitNotice
+        ? await deps.rateLimitNotice.run(
+            client,
+            !inc.unprompted && !inc.synthetic && !actor.isBot && inc.userId
+              ? { target: encodeDeliveryTarget(inc.channel, replyThreadTs), user: inc.userId }
+              : undefined,
+            serialize,
+          )
+        : await serialize();
       const rendered = renderConversationView(serialized.view);
       if (rendered.header) conversationHeader = rendered.header;
       if (rendered.priorTurns.length) priorTurns = rendered.priorTurns;
@@ -434,13 +459,10 @@ export function createTurnHandler(deps: {
     }
 
     const ownFiles = inc.files.map((f) => (f.user || !inc.userId ? f : { ...f, user: inc.userId }));
-    const inboundFiles = await hydrateSlackFiles(
-      earlierFiles.length ? [...ownFiles, ...earlierFiles] : ownFiles,
-      async (id) => {
-        const response = await client.files.info({ file: id });
-        return response?.file as SlackFile | undefined;
-      },
-    );
+    const inboundFiles = await hydrateSlackFiles(ownFiles, async (id) => {
+      const response = await client.files.info({ file: id });
+      return response?.file as SlackFile | undefined;
+    });
     const resolveFileAuthor = async (userId: string | undefined): Promise<string | undefined> =>
       userId ? (await classifyUserCached(client, userId)).actor.displayName : undefined;
     const { attachments, issues } = await processInboundFiles(

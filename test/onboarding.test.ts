@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { buildApp } from "../src/wiring.ts";
 import type { Config } from "../src/config.ts";
 import { scopeId, type TurnRequest } from "../src/types.ts";
-import { detectOnboardingStatus, setOnboardingStatus } from "../src/onboarding/onboarding.ts";
+import { detectOnboardingStatus, setOnboardingStatus, PROACTIVE_OPENER_PROMPT } from "../src/onboarding/onboarding.ts";
 import { testConfig } from "./support/test-config.ts";
 
 const actor = { externalId: "U1" };
@@ -74,7 +74,7 @@ test("a new personal DM gets the high-priority pending onboarding prompt", async
   assert.match(sys.reply ?? "", /## Pending Onboarding/);
   assert.match(sys.reply ?? "", /high-priority setup task/);
   assert.match(sys.reply ?? "", /no reason to skip it/);
-  assert.match(sys.reply ?? "", /skills\/onboarding\/SKILL\.md/);
+  assert.match(sys.reply ?? "", /skill:\/\/onboarding\/SKILL\.md/);
 });
 
 test("completed or dismissed onboarding markers suppress the pending prompt", async () => {
@@ -112,4 +112,43 @@ test("onboarding prompt does not appear in channel sessions", async () => {
   } as TurnRequest);
 
   assert.doesNotMatch(sys.reply ?? "", /## Pending Onboarding/);
+});
+
+test("the opener defers Slack setup until status can be checked without requiring provider configuration", () => {
+  assert.match(PROACTIVE_OPENER_PROMPT, /Do not mention Slack bot setup in this automatic greeting/);
+  assert.match(PROACTIVE_OPENER_PROMPT, /wait for their reply before reading admin-only status/);
+  assert.match(PROACTIVE_OPENER_PROMPT, /empty direct OAuth list does not rule out Composio/);
+  assert.match(PROACTIVE_OPENER_PROMPT, /skip connections and continue onboarding/);
+  assert.match(PROACTIVE_OPENER_PROMPT, /do not ask them to create OAuth apps or supply project keys/);
+});
+
+test("ideas web conversations bypass onboarding on every turn without completing it", async () => {
+  const { app, skills, memory } = freshApp();
+  await waitForOnboardingSkill(skills);
+  const threadRef = "web:U1:ideas:12345678-1234-4123-8123-123456789abc";
+  for (let i = 0; i < 2; i++) {
+    const sys = await app.turn({
+      surface: "web",
+      actor,
+      conversation: { kind: "dm", threadRef },
+      text: "!sysprompt",
+    } as TurnRequest);
+    assert.doesNotMatch(sys.reply ?? "", /## Pending Onboarding/);
+    assert.match(sys.reply ?? "", /Skip the onboarding skill and setup flow for this entire conversation/);
+  }
+  assert.equal(detectOnboardingStatus(await memory.read(scopeId("personal", "U1"))), "not_started");
+  const ordinary = await app.turn({
+    surface: "web",
+    actor,
+    conversation: { kind: "dm", threadRef: "web:U1:ordinary" },
+    text: "!sysprompt",
+  } as TurnRequest);
+  assert.match(ordinary.reply ?? "", /## Pending Onboarding/);
+  const slack = await app.turn({
+    surface: "slack",
+    actor,
+    conversation: { kind: "dm", threadRef },
+    text: "!sysprompt",
+  } as TurnRequest);
+  assert.match(slack.reply ?? "", /## Pending Onboarding/);
 });

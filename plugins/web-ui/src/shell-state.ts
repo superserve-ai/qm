@@ -1,6 +1,12 @@
+import type { SuggestedActivity } from "../../chassis/src/suggested-activities.ts";
+
 export type AuthMode = "portal" | "dev";
 
 export interface Me {
+  companyName?: string | null;
+  welcomeCohort?: string;
+  suggestedActivities?: SuggestedActivity[];
+  suggestedActivitiesGeneration?: boolean;
   individualModelAuth?: boolean;
   modelAuthConnected?: boolean;
   mode?: AuthMode;

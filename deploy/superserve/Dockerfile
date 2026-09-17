@@ -47,6 +47,7 @@ COPY plugins/auth/tsconfig.json ./plugins/auth/
 COPY plugins/portal/src ./plugins/portal/src
 COPY plugins/portal/tsconfig.json ./plugins/portal/
 COPY plugins/web-ui/server ./plugins/web-ui/server
+COPY plugins/web-ui/src/app-edit.ts ./plugins/web-ui/src/app-edit.ts
 COPY --from=web-build /app/plugins/web-ui/dist-web ./plugins/web-ui/dist-web
 
 COPY scripts/qm-tenant-entry.mjs scripts/qm-tenant-loopback.mjs ./scripts/

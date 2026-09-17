@@ -67,6 +67,13 @@ test("commands are run under a timeout that force-kills a process ignoring SIGTE
   assert.ok(fake.execScripts().some((s) => /\btimeout -k \d+ \d+ sh -c /.test(s)));
 });
 
+test("a command force-killed after ignoring SIGTERM is still reported as timed out", async () => {
+  const h = await sandbox.provision(layers);
+  const r = await sandbox.run(h, "kill -9 $$");
+  assert.equal(r.code, 137);
+  assert.equal(r.timedOut, true, "timeout -k's SIGKILL escalation must not be reported as an ordinary failure");
+});
+
 test("provision creates one sandbox per scope with scope metadata and lifecycle knobs", async () => {
   const h = await sandbox.provision(layers, { env: { MY_VAR: "v1" } });
   assert.equal(h.coldStart, true);

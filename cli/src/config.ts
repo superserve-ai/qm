@@ -968,7 +968,9 @@ function scopeSandboxBackends(core: Record<string, string> | undefined): string[
   if (!scopes || typeof scopes !== "object" || Array.isArray(scopes)) {
     throw new CliError("SANDBOX_SCOPE_BACKENDS must be an object");
   }
-  return Object.values(scopes).filter((value): value is string => typeof value === "string");
+  return Object.values(scopes)
+    .filter((value): value is string => typeof value === "string")
+    .map((value) => value.trim());
 }
 
 export function requiresAwsMicrovmImage(config: QmConfig): boolean {
@@ -976,7 +978,7 @@ export function requiresAwsMicrovmImage(config: QmConfig): boolean {
   const core = config.env.core;
   if ((core?.DEPLOY_PROVIDER?.trim() || "aws") === "aws") return true;
   if ((core?.SANDBOX_BACKEND?.trim() || config.sandbox?.backend || "aws") === "aws") return true;
-  return scopeSandboxBackends(core).some((value) => value.trim() === "aws");
+  return scopeSandboxBackends(core).includes("aws");
 }
 
 function validateAwsFrontDoor(config: QmConfig, path: string): void {

@@ -235,8 +235,13 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       live.current = Number(info.metadata[SUPERSERVE_METADATA.epoch] ?? 0) <= (await configEpoch());
       return live.current;
     } catch (err) {
-      if (err instanceof SuperserveSandboxGoneError) return false;
-      throw err;
+      if (!(err instanceof SuperserveSandboxGoneError)) throw err;
+      dropLive(name, live.session.id);
+      const scope = scopeByName.get(name);
+      if (scope !== undefined) await forget(scope, live.session.id);
+      throw new Error(`superserve sandbox for ${name} is gone; the next provision creates a replacement`, {
+        cause: err,
+      });
     }
   }
 
@@ -442,16 +447,20 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
 
   async function execRaw(name: string, script: string, timeoutSec: number): Promise<ExecResult> {
     return withLive(name, async ({ session }) => {
+      const t0 = Date.now();
       const r = await session.run(spooledScript(`export HOME=${shq(configuredHome)}; ${script}`, timeoutSec), {
         timeoutMs: timeoutSec * 1000 + 30_000,
         maxOutputBytes: OUTPUT_CAP_BYTES,
       });
+      const elapsedMs = Date.now() - t0;
       const stderr = r.truncated ? `${r.stderr}\n${TRUNCATED_NOTICE}` : r.stderr;
       return {
         stdout: r.stdout,
         stderr,
         code: r.exitCode,
-        timedOut: r.exitCode === TIMEOUT_EXIT_CODE || r.exitCode === TIMEOUT_KILLED_EXIT_CODE,
+        timedOut:
+          r.exitCode === TIMEOUT_EXIT_CODE ||
+          (r.exitCode === TIMEOUT_KILLED_EXIT_CODE && elapsedMs >= timeoutSec * 1000),
       };
     });
   }

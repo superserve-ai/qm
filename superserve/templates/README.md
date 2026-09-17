@@ -30,7 +30,8 @@ Deliberately **not** in the template:
 - `nftables`: egress is not enforced inside the VM on Superserve.
 - A `PATH` override: the exec daemon supplies its own `PATH` and `HOME` at runtime, so template
   `env` steps for those are ignored (other `env` steps, e.g. `VIRTUAL_ENV`, do carry through).
-  The backend discovers `$HOME` per session, so scope workspaces land in `$HOME/workspace`.
+  The backend explicitly exports `SUPERSERVE_HOME_DIR` (default `/root`), so scope workspaces
+  land in that directory's `workspace` subdirectory.
 - The optional browser engine (`INSTALL_BROWSER_ENGINE=1` in the Dockerfile). The Dockerfile
   relies on Debian's apt `chromium`; on Ubuntu 24.04 that package is a snap stub that does
   not run in a VM without snapd, so a different install path is needed before this can be
@@ -57,6 +58,10 @@ Export `SUPERSERVE_BASE_URL` (or pass `--base-url`) to build against a non-produ
 
 Template names are unique per team, so one build per release per Superserve team is enough.
 Bumping a pinned CLI version in `qm-agent.ts` for an already-built release requires `--force`.
+Existing sandboxes keep their original disk after an in-place rebuild. Changing
+`SUPERSERVE_TEMPLATE` to a different name replaces existing scope sandboxes and deletes
+their resident disks; export needed files first. See the [backend configuration and
+rollout guide](../../docs/superserve.md).
 
 ## How the backend picks it
 

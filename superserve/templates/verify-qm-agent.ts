@@ -162,9 +162,15 @@ async function main(): Promise<void> {
     if (env.exitCode !== 0) fail(`environment probe exited ${env.exitCode}: ${env.stderr.trim()}`);
     const home = /^HOME=(.*)$/m.exec(env.stdout)?.[1] ?? "";
     if (!home.startsWith("/")) fail(`$HOME is not set for the login user (got ${JSON.stringify(home)})`);
-    const homeOk = await run(sandbox, 'test -d "$HOME" && test -w "$HOME" && echo writable');
-    console.log(`$HOME exists and is writable: ${homeOk.stdout.trim() === "writable" ? "yes" : "no"}`);
-    if (homeOk.stdout.trim() !== "writable") fail(`$HOME (${home}) is missing or not writable`);
+    const whoami = /^whoami=(.*)$/m.exec(env.stdout)?.[1] ?? "";
+    if (whoami.trim() !== "root") {
+      fail(`the backend always exports HOME=/root and runs commands as root; got whoami=${JSON.stringify(whoami)}`);
+    }
+    const workspaceOk = await run(sandbox, 'test -d "/root/workspace" && test -w "/root/workspace" && echo writable');
+    console.log(`/root/workspace exists and is writable: ${workspaceOk.stdout.trim() === "writable" ? "yes" : "no"}`);
+    if (workspaceOk.stdout.trim() !== "writable") {
+      fail("/root/workspace is missing or not writable, but the backend hardcodes HOME=/root and provisions there");
+    }
 
     console.log("--- tool inventory ---");
     const inv = await run(

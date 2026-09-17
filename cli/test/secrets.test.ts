@@ -401,6 +401,13 @@ test("scope-selected providers require both Modal and Sprites credentials", () =
     assert.ok(required.includes(name), name);
 });
 
+test("a scope routed to superserve requires its API key even when it is not the primary backend", () => {
+  const config = makeConfig({
+    env: { core: { SANDBOX_BACKEND: "local", SANDBOX_SCOPE_BACKENDS: '{"channel":"superserve"}' } },
+  });
+  assert.equal(secretByName(config, "SUPERSERVE_API_KEY").required, true);
+});
+
 test("shared Fly publishing requires private peers only when selected", () => {
   for (const provider of ["fly", "aws"]) {
     for (const shared of [false, true]) {

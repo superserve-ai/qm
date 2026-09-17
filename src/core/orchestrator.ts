@@ -105,7 +105,7 @@ import { createMemoryMap } from "../persistence/durable-map.ts";
 import { collectBlob, createMemoryBlobTransferStore } from "../persistence/blob-transfer.ts";
 import { createSkillMaterializer, skillsIndex, SKILLS_DIR } from "../skills/materialize.ts";
 import {
-  detectOnboardingStatus,
+  resolveOnboardingStatus,
   onboardingSkillVisible,
   isIdeasConversation,
   PROACTIVE_OPENER_PROMPT,
@@ -157,8 +157,8 @@ import {
 } from "../harness/replay.ts";
 import { errMessage, swallow, swallowAs } from "../util/errors.ts";
 import { isObj } from "../util/objects.ts";
-import { headSlice, jsonbSafeStringify } from "../util/text.ts";
-import { NonRetryableTurnError, turnFailureMessage, type TurnFailurePayload } from "./turn-error.ts";
+import { absoluteAppLinks, headSlice, jsonbSafeStringify } from "../util/text.ts";
+import { NonRetryableTurnError, TitleRejected, turnFailureMessage, type TurnFailurePayload } from "./turn-error.ts";
 import { personKey, samePerson } from "../directory/person.ts";
 import { sleep } from "../util/async.ts";
 import { hashId } from "../util/crypto.ts";
@@ -344,7 +344,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     } catch (e) {
       deps.errors?.record({
         category: "session_title",
-        code: "generation_failed",
+        code: e instanceof TitleRejected ? `rejected_${e.rule}` : "generation_failed",
         message: errMessage(e),
         scopeLabel: scopeId,
         sessionId,
@@ -1218,8 +1218,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         ? "## Ideas conversation\nThe user chose to explore ideas in this conversation. Skip the onboarding skill and setup flow for this entire conversation, including follow-ups. Do not mark onboarding completed or dismissed in memory. Use available authorized company context and answer their request directly."
         : "";
       if (!onboardingBlock && useMemory && conversation.kind === "dm" && onboardingSkillVisible(visibleSkills)) {
-        const fullMemory = await deps.memory.read(memoryScopeId).catch(swallowAs("orchestrator: memory read", ""));
-        onboardingBlock = renderPendingOnboardingPrompt(detectOnboardingStatus(fullMemory));
+        onboardingBlock = await resolveOnboardingStatus(deps.memory, deps.sessions, memoryScopeId)
+          .then(renderPendingOnboardingPrompt)
+          .catch(swallowAs("orchestrator: onboarding status", ""));
       }
 
       let type: SessionType = "channel";
@@ -1266,7 +1267,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           ? {
               status: "ok",
               sessionId: session.id,
-              reply: recordedAnswer.text,
+              reply: absoluteAppLinks(recordedAnswer.text, deps.publicWebUrl),
               sourceUserSeq: recordedTurn.userSeq,
               sourceAssistantEntrySeq: recordedAnswer.seq,
             }
@@ -2225,6 +2226,32 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             sourceThreadRef: session.threadRef,
             sourceSessionId: session.id,
           });
+        const earlyTaskAck =
+          input.surface === "slack" &&
+          input.origin.kind === "human" &&
+          conversation.kind === "dm" &&
+          !input.approval &&
+          !input.botActor &&
+          !input.swarm;
+        const publishFirstAck = (deliberatePost: boolean) => {
+          if (!input.runId || !input.addressed || isPollFire || !spineFirstBlockOpen || resume || approvalReplay)
+            return;
+          spineFirstBlockOpen = false;
+          const ack = spineFirstBlock.trim();
+          if (deliberatePost || !ack || !defaultDestination || !deps.deliveries) return;
+          spineAckText = ack;
+          const runId = input.runId;
+          const ackKey = `ack:${turnKey}`;
+          void reachEnqueue({
+            deliveries: deps.deliveries,
+            destination: defaultDestination,
+            text: ack,
+            idempotencyKey: ackKey,
+            provenance: postProvenance(ackKey),
+          })
+            .then(() => deps.turnStream?.markSurfacePosted(runId))
+            .catch(swallowAs("orchestrator: first-block ack", undefined));
+        };
         const surfaceToolDeps = createSurfaceToolDeps({
           deps,
           input,
@@ -3000,25 +3027,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 if (toolCalls === 1 && input.runId) {
                   if (!input.surfaceTools) {
                     deps.turnStream?.noteToolCall(input.runId);
-                  } else if (input.addressed && !isPollFire && spineFirstBlockOpen && !resume && !approvalReplay) {
-                    spineFirstBlockOpen = false;
+                  } else {
                     const payload = appended.payload as { tool?: unknown; action?: unknown };
-                    const deliberatePost = payload?.tool === surfaceName && payload?.action === "post";
-                    const ack = spineFirstBlock.trim();
-                    if (!deliberatePost && ack && defaultDestination && deps.deliveries) {
-                      spineAckText = ack;
-                      const runId = input.runId;
-                      const ackKey = `ack:${turnKey}`;
-                      void reachEnqueue({
-                        deliveries: deps.deliveries,
-                        destination: defaultDestination,
-                        text: ack,
-                        idempotencyKey: ackKey,
-                        provenance: postProvenance(ackKey),
-                      })
-                        .then(() => deps.turnStream?.markSurfacePosted(runId))
-                        .catch(swallowAs("orchestrator: first-block ack", undefined));
-                    }
+                    publishFirstAck(payload?.tool === surfaceName && payload?.action === "post");
                   }
                 }
               }
@@ -3215,6 +3226,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               if (input.surfaceTools && spineFirstBlockOpen && spineFirstBlock.length < FIRST_BLOCK_CAPTURE_MAX_CHARS)
                 spineFirstBlock += chunk;
             },
+            onToolCallStart: (name: string) => {
+              if (!earlyTaskAck || name === surfaceName) return;
+              if (input.surfaceTools) publishFirstAck(false);
+              else if (input.runId) deps.turnStream?.noteToolCall(input.runId);
+            },
             onTextBlockStart: async (phase) => {
               if (input.runId && deps.turnStream && !input.surfaceTools) deps.turnStream.publishBlockStart(input.runId);
               if (input.surfaceTools && spineFirstBlock) spineFirstBlockOpen = false;
@@ -3286,7 +3302,12 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             modelCalls += segment.modelCalls ?? 0;
             addUsage();
           }
-          return { ...segment, modelCalls, cacheUsage: usage };
+          return {
+            ...segment,
+            ...(segment.reply ? { reply: absoluteAppLinks(segment.reply, deps.publicWebUrl) } : {}),
+            modelCalls,
+            cacheUsage: usage,
+          };
         };
         const primaryServedTape = !!tapeRows?.serve && history === visibleHistory;
         let result = await runHarnessTurn(turnInput, {

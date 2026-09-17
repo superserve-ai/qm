@@ -30,8 +30,8 @@ Deliberately **not** in the template:
 - `nftables`: egress is not enforced inside the VM on Superserve.
 - A `PATH` override: the exec daemon supplies its own `PATH` and `HOME` at runtime, so template
   `env` steps for those are ignored (other `env` steps, e.g. `VIRTUAL_ENV`, do carry through).
-  The backend explicitly exports `SUPERSERVE_HOME_DIR` (default `/root`), so scope workspaces
-  land in that directory's `workspace` subdirectory.
+  The backend explicitly exports `HOME` from `SUPERSERVE_HOME_DIR` (default `/root`), so scope
+  workspaces land in that directory's `workspace` subdirectory.
 - The optional browser engine (`INSTALL_BROWSER_ENGINE=1` in the Dockerfile). The Dockerfile
   relies on Debian's apt `chromium`; on Ubuntu 24.04 that package is a snap stub that does
   not run in a VM without snapd, so a different install path is needed before this can be

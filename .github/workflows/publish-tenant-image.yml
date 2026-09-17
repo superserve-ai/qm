@@ -119,6 +119,8 @@ jobs:
             plugins/web-ui/package-lock.json
       - name: Install
         run: npm ci
+      - name: Build connector SDK
+        run: npm run build:connector-sdk
       - name: ${{ matrix.name }}
         env:
           CORE_TEST_SHARD: ${{ matrix.shard }}
@@ -157,6 +159,10 @@ jobs:
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/qm
         run: npm run test:pg
+      - name: Swarm HTTP runtime tests
+        env:
+          SWARM_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/qm
+        run: node --experimental-test-module-mocks --test test/swarm-orchestrator.test.ts
       - name: Model registry cross-process tests
         env:
           MODEL_OVERLAY_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/qm

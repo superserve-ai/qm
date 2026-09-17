@@ -56,6 +56,7 @@ const SCRATCH_IDLE_PAUSE_SEC = 10 * 60;
 const SCRATCH_RETENTION_SEC = 24 * 3600;
 const PREP_TIMEOUT_SEC = 60;
 const TIMEOUT_EXIT_CODE = 124;
+const TIMEOUT_KILLED_EXIT_CODE = 137;
 const KILL_AFTER_SEC = 10;
 const OUTPUT_CAP_BYTES = 2 * 1024 * 1024;
 const TRUNCATED_NOTICE = "[superserve: output truncated at 2 MiB; redirect large output to a file]";
@@ -446,7 +447,12 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         maxOutputBytes: OUTPUT_CAP_BYTES,
       });
       const stderr = r.truncated ? `${r.stderr}\n${TRUNCATED_NOTICE}` : r.stderr;
-      return { stdout: r.stdout, stderr, code: r.exitCode, timedOut: r.exitCode === TIMEOUT_EXIT_CODE };
+      return {
+        stdout: r.stdout,
+        stderr,
+        code: r.exitCode,
+        timedOut: r.exitCode === TIMEOUT_EXIT_CODE || r.exitCode === TIMEOUT_KILLED_EXIT_CODE,
+      };
     });
   }
 

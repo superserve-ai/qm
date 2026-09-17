@@ -1,3 +1,4 @@
+import { assertPersonalConversationParity } from "./support/personal-conversation-parity.ts";
 import "./run-availability.ts";
 import { migrateTranscriptPage } from "../scripts/lib/transcript-tape-migration.ts";
 import { test, before } from "node:test";
@@ -2256,6 +2257,15 @@ test(
     assert.deepEqual(await s.getTranscriptEntries(session.id), before);
     assert.deepEqual(await s.getTranscriptEntries(session.id, { limit: 2 }), before.slice(-2));
     assert.deepEqual(await s.getTranscriptEntries(session.id, { sinceSeq: 1, limit: 2 }), before.slice(-2));
+    for (const beforeSeq of [0, 1, 3, 4, 99]) {
+      for (const limit of [undefined, 0, 1, 10]) {
+        const expected = before.filter((entry) => entry.seq >= 1 && entry.seq < beforeSeq);
+        let page = expected;
+        if (limit !== undefined) page = limit === 0 ? [] : expected.slice(-limit);
+        assert.deepEqual(await s.getTranscriptEntries(session.id, { sinceSeq: 1, beforeSeq, limit }), page);
+        assert.deepEqual(await s.getEntries(session.id, { sinceSeq: 1, beforeSeq, limit }), page);
+      }
+    }
     assert.equal(await s.tapeCoverage(session.id), -1);
     assert.equal(await s.clearSecurityTaint(session.id), true);
     const after = await s.getEntries(session.id);
@@ -2474,4 +2484,35 @@ test("pg child parentage and spawn metadata survive reopening", { skip }, async 
   );
   await reopened.setParentSession(child.id, null);
   assert.equal((await reopened.get(child.id))?.parentSessionId, undefined);
+});
+
+test("pg personal conversation counts exclude synthetic and inherited chats", { skip }, async () => {
+  await assertPersonalConversationParity(createPostgresSessionStore(URL!), "pg-personal-count");
+});
+
+test("pg personal conversation counts tolerate legacy null characters", { skip }, async () => {
+  const store = createPostgresSessionStore(URL!);
+  const scope = scopeId("personal", "legacy-null-count");
+  const session = await store.getOrCreateByThread("legacy-null-count", "dm", scope);
+  const { lease } = await store.acquireLease(session.id);
+  assert.ok(lease);
+  await store.append(lease, { type: "user", payload: { text: "Hello" }, scopeLabel: scope });
+  await store.releaseLease(lease);
+  const pg = (await import("pg")).default;
+  const raw = new pg.Pool({ connectionString: URL });
+  try {
+    await raw.query("DELETE FROM session_tape WHERE session_id = $1", [session.id]);
+    await raw.query("UPDATE session_entries SET payload = $2 WHERE session_id = $1", [
+      session.id,
+      JSON.stringify({ text: "Hello\u0000", hidden: "true", overheard: "true" }),
+    ]);
+    assert.equal(await store.countPersonalConversations(scope), 1);
+    await raw.query("UPDATE session_entries SET payload = $2 WHERE session_id = $1", [
+      session.id,
+      JSON.stringify({ text: "Hello\u0000", hidden: true }),
+    ]);
+    assert.equal(await store.countPersonalConversations(scope), 0);
+  } finally {
+    await raw.end();
+  }
 });

@@ -850,11 +850,18 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
     },
 
     async getTranscriptEntries(sessionId, opts?: GetEntriesOptions) {
-      const rows = await q(
-        "SELECT * FROM session_transcript_entries WHERE session_id = $1 AND seq >= $2 ORDER BY seq DESC" +
-          (opts?.limit === undefined ? "" : " LIMIT $3"),
-        [sessionId, opts?.sinceSeq ?? 0, ...(opts?.limit === undefined ? [] : [opts.limit])],
-      );
+      const params: unknown[] = [sessionId, opts?.sinceSeq ?? 0];
+      let sql = "SELECT * FROM session_transcript_entries WHERE session_id = $1 AND seq >= $2";
+      if (opts?.beforeSeq !== undefined) {
+        params.push(opts.beforeSeq);
+        sql += ` AND seq < $${params.length}`;
+      }
+      sql += " ORDER BY seq DESC";
+      if (opts?.limit !== undefined) {
+        params.push(opts.limit);
+        sql += ` LIMIT $${params.length}`;
+      }
+      const rows = await q(sql, params);
       return rows.map(rowToEntry).reverse();
     },
 
@@ -905,19 +912,18 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
     },
 
     async getEntries(sessionId, opts?: GetEntriesOptions): Promise<SessionEntry[]> {
-      const since = opts?.sinceSeq ?? 0;
-      if (opts?.limit !== undefined) {
-        const rows = await q(
-          "SELECT * FROM session_entries WHERE session_id = $1 AND seq >= $2 ORDER BY seq DESC LIMIT $3",
-          [sessionId, since, opts.limit],
-        );
-        return rows.map(rowToEntry).reverse();
+      const params: unknown[] = [sessionId, opts?.sinceSeq ?? 0];
+      let sql = "SELECT * FROM session_entries WHERE session_id = $1 AND seq >= $2";
+      if (opts?.beforeSeq !== undefined) {
+        params.push(opts.beforeSeq);
+        sql += ` AND seq < $${params.length}`;
       }
-      const rows = await q("SELECT * FROM session_entries WHERE session_id = $1 AND seq >= $2 ORDER BY seq ASC", [
-        sessionId,
-        since,
-      ]);
-      return rows.map(rowToEntry);
+      sql += " ORDER BY seq DESC";
+      if (opts?.limit !== undefined) {
+        params.push(opts.limit);
+        sql += ` LIMIT $${params.length}`;
+      }
+      return (await q(sql, params)).map(rowToEntry).reverse();
     },
 
     async getContextWindow(sessionId) {
@@ -1347,6 +1353,33 @@ export function createPostgresSessionStore(connectionString: string, opts: Store
     async scopeHasSessions(scope): Promise<boolean> {
       const rows = await q("SELECT EXISTS(SELECT 1 FROM sessions WHERE scope_id = $1) AS present", [scope]);
       return Boolean(rows[0]?.present);
+    },
+
+    async countPersonalConversations(scope, limit = 3): Promise<number> {
+      const boundedLimit = Math.max(0, Math.floor(limit));
+      if (!boundedLimit) return 0;
+      const rows = await q(
+        `SELECT COUNT(*) AS n FROM (
+           SELECT s.id FROM sessions s
+           WHERE s.scope_id = $1 AND s.type = 'dm' AND s.parent_session_id IS NULL
+             AND ${hasOrigin("s", "conversation")}
+             AND EXISTS (
+               SELECT 1 FROM (
+                 SELECT DISTINCT ON (seq) seq, type, payload FROM (
+                   SELECT seq, type, payload, 1 AS priority FROM session_transcript_entries WHERE session_id = s.id
+                   UNION ALL
+                   SELECT seq, type, payload, 0 AS priority FROM session_entries WHERE session_id = s.id
+                 ) sources ORDER BY seq, priority DESC
+               ) e
+               WHERE e.seq > COALESCE(s.fork_boundary_seq, -1) AND e.type = 'user'
+                 AND (safe_json(replace(e.payload, '\\u0000', ''))->'hidden')::text IS DISTINCT FROM 'true'
+                 AND (safe_json(replace(e.payload, '\\u0000', ''))->'overheard')::text IS DISTINCT FROM 'true'
+             )
+           LIMIT $2
+         ) conversations`,
+        [scope, boundedLimit],
+      );
+      return Number(rows[0]?.n ?? 0);
     },
 
     async sessionsByThreadRefs(threadRefs): Promise<SessionRef[]> {

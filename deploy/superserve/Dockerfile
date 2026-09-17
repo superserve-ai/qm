@@ -11,6 +11,12 @@ COPY plugins/web-ui/public ./public
 COPY plugins/web-ui/src ./src
 RUN npm run build
 
+FROM node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd AS connector-sdk-build
+WORKDIR /app
+COPY deploy/connector-sdk ./deploy/connector-sdk
+RUN npm ci --prefix deploy/connector-sdk --ignore-scripts --no-audit --no-fund \
+  && node deploy/connector-sdk/build.mjs
+
 FROM node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd
 RUN apk add --no-cache ca-certificates curl git git-daemon util-linux
 WORKDIR /app
@@ -25,6 +31,7 @@ COPY plugins/portal/package.json plugins/portal/package-lock.json ./plugins/port
 RUN cd plugins/portal && npm ci --omit=dev && rm -rf /root/.npm /tmp/node-compile-cache \
   && mkdir -p /app/plugins/auth && ln -s /app/plugins/portal/node_modules /app/plugins/auth/node_modules
 
+COPY --from=connector-sdk-build /app/.generated/connector-sdk ./.generated/connector-sdk
 COPY src ./src
 COPY tsconfig.json ./
 COPY cli/templates/slack-manifest.json ./cli/templates/slack-manifest.json

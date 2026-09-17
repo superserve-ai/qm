@@ -471,6 +471,24 @@ test("SANDBOX_BACKEND: unset defaults to local (dev only); the retired secondary
     ),
     "a stray key without a template must not enable the secondary backend",
   );
+  assert.throws(
+    () =>
+      loadConfig({
+        SANDBOX_BACKEND: "local",
+        SANDBOX_SCOPE_BACKENDS: '{"channel":"superserve"}',
+        SUPERSERVE_API_KEY: "ss_live_k",
+      }),
+    /SUPERSERVE_TEMPLATE/,
+    "a scope routed to superserve needs the template even when it is not the primary backend",
+  );
+  assert.doesNotThrow(() =>
+    loadConfig({
+      SANDBOX_BACKEND: "local",
+      SANDBOX_SCOPE_BACKENDS: '{"channel":"superserve"}',
+      SUPERSERVE_TEMPLATE: "qm-agent-1.0.0",
+      SUPERSERVE_API_KEY: "ss_live_k",
+    }),
+  );
   assert.ok(
     enabledSandboxBackends(
       loadConfig({ SANDBOX_BACKEND: "local", SUPERSERVE_API_KEY: "ss_live_k", SUPERSERVE_TEMPLATE: "qm-agent-1.0.0" }),

@@ -202,13 +202,13 @@ The `publish` job runs in the `release` environment, and the trust is bound to t
 On the GCP side, in the platform project: the `github-provider` provider in the `github-pool` pool must map `google.subject` to `assertion.sub` and carry the attribute condition
 
 ```
-assertion.repository == "superserve-ai/qm-superserve" && assertion.sub == "repo:superserve-ai/qm-superserve:environment:release"
+assertion.repository == "superserve-ai/qm" && assertion.sub == "repo:superserve-ai/qm:environment:release"
 ```
 
 so a token minted by any other repository, branch, or job is rejected at the provider. That subject
 
 ```
-principal://iam.googleapis.com/projects/<project number>/locations/global/workloadIdentityPools/github-pool/subject/repo:superserve-ai/qm-superserve:environment:release
+principal://iam.googleapis.com/projects/<project number>/locations/global/workloadIdentityPools/github-pool/subject/repo:superserve-ai/qm:environment:release
 ```
 
 needs `roles/iam.workloadIdentityUser` on the CI service account, and the CI service account needs `roles/artifactregistry.writer` on the `superserve` Artifact Registry repository only, not on the project.

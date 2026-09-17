@@ -4,6 +4,7 @@ import { html, nothing, render, type TemplateResult } from "lit";
 import {
   Box,
   Brain,
+  CalendarDays,
   Clock,
   Files,
   Folder,
@@ -86,9 +87,9 @@ import { attachTooltip, hideTooltip, tip } from "./tooltip";
 import { clearConnectorNotice, noteConnectorResult, renderConnectors, resetKeychainState } from "./connectors";
 import { openDeployById, renderDeploys } from "./deploys";
 import { renderMemory, resetMemoryState } from "./memory";
+import { renderCalendar } from "./calendar";
 import {
   inboxOpenCount,
-  openInboxItemById,
   refreshInbox,
   renderInbox,
   resetActiveInboxItem,
@@ -204,6 +205,7 @@ function resetSidebarWidth(): void {
 const ICON = {
   newChat: Plus,
   inbox: InboxGlyph,
+  calendar: CalendarDays,
   chats: MessageSquare,
   contexts: Folder,
   files: Files,
@@ -613,7 +615,8 @@ export function renderSidebarTop(): void {
   render(
     html`
       <nav class="nav quick-nav" @click=${onNavClick}>
-        ${navRow("chats", ICON.home, "Home")} ${can("inbox") ? inboxNavRow() : nothing}
+        ${navRow("chats", ICON.home, "Home")}
+        ${can("inbox") ? html`${inboxNavRow()} ${navRow("calendar", ICON.calendar, "Calendar")}` : nothing}
         ${actionRow(Search, "Search", () => {
           hideTooltip();
           openChatSearch();
@@ -694,6 +697,9 @@ export function switchView(v: View): void {
     case "inbox":
       void renderInbox();
       break;
+    case "calendar":
+      renderCalendar();
+      break;
     case "webhooks":
       void renderWebhooksPage();
       break;
@@ -757,6 +763,9 @@ function refreshActiveView(v: View): void {
       break;
     case "inbox":
       void renderInbox();
+      break;
+    case "calendar":
+      renderCalendar();
       break;
     case "contexts":
       void renderContexts();
@@ -1102,9 +1111,9 @@ export async function boot(): Promise<void> {
     if (wanted === "deploys" && wantedItem) openDeployById(wantedItem);
     if (wanted === "crons" && wantedItem) openCronById(wantedItem);
     if (wanted === "webhooks" && wantedItem) openWebhookById(wantedItem);
-    if (wanted === "inbox" && wantedItem) openInboxItemById(wantedItem);
     if (wanted === "skills" && wantedItem) openSkillById(wantedItem);
     switchView(wanted as View);
+    if (wanted === "inbox") routeInboxHistory(wantedItem);
   } else if (connectedProvider && sessionsState.list.length) {
     const recent = [...sessionsState.list].sort((a, b) => activityOf(b) - activityOf(a))[0]!;
     exitSplitIfActive();

@@ -67,11 +67,19 @@ test("commands are run under a timeout that force-kills a process ignoring SIGTE
   assert.ok(fake.execScripts().some((s) => /\btimeout -k \d+ \d+ sh -c /.test(s)));
 });
 
-test("a command force-killed after ignoring SIGTERM is still reported as timed out", async () => {
+test("an immediate SIGKILL unrelated to the timeout deadline is not reported as timed out", async () => {
   const h = await sandbox.provision(layers);
   const r = await sandbox.run(h, "kill -9 $$");
   assert.equal(r.code, 137);
-  assert.equal(r.timedOut, true, "timeout -k's SIGKILL escalation must not be reported as an ordinary failure");
+  assert.equal(r.timedOut, false, "a self-kill that completes instantly cannot be timeout -k's own escalation");
+});
+
+test("a command force-killed by timeout -k's own SIGKILL escalation is reported as timed out", async () => {
+  const h = await sandbox.provision(layers);
+  fake.beforeNextRun(() => new Promise((resolve) => setTimeout(resolve, 1100)));
+  const r = await sandbox.run(h, "kill -9 $$", { timeoutMs: 1 });
+  assert.equal(r.code, 137);
+  assert.equal(r.timedOut, true, "an exit that takes at least the full deadline is timeout -k's own escalation");
 });
 
 test("provision creates one sandbox per scope with scope metadata and lifecycle knobs", async () => {
@@ -579,6 +587,30 @@ test("a handle never runs against a replacement another turn is still provisioni
   const idleBefore = fake.current(scopeName())?.timeoutSeconds;
   await sandbox.teardown(held, { keepWarm: true });
   assert.equal(fake.current(scopeName())?.timeoutSeconds, idleBefore, "a stale teardown leaves the replacement alone");
+});
+
+test("a sandbox that disappears while checking ownership fails provisioning instead of returning a handle to it", async () => {
+  const store: DurableMap<StoredSuperserveSandbox> = createMemoryMap();
+  sandbox = make({ store, layerToolFiles: () => [] });
+  const first = await sandbox.provision(layers);
+  const lostId = fake.current(scopeName())!.id;
+  assert.equal((await sandbox.run(first, "echo ok")).stdout.trim(), "ok");
+
+  fake.beforeNextInfo(async () => {
+    fake.beforeNextInfo(async () => {
+      fake.expire(scopeName());
+    });
+  });
+  await assert.rejects(sandbox.provision(layers), /is gone/);
+
+  assert.equal(await store.get(scope), null, "the durable record for the gone sandbox is cleared");
+  const fresh = await sandbox.provision(layers);
+  assert.equal(
+    fresh.coldStart,
+    true,
+    "the next provision creates a genuine replacement rather than reusing the gone id",
+  );
+  assert.notEqual(fake.current(scopeName())!.id, lostId);
 });
 
 test("a gone sandbox never forgets a replacement another instance already recorded", async () => {

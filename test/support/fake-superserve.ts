@@ -43,6 +43,7 @@ export interface FakeSuperserve {
   acceptNetworkUpdateWhilePaused(): void;
   ignoreNetworkUpdateWhilePaused(): void;
   beforeNextRun(hook: () => Promise<void>): void;
+  beforeNextInfo(hook: () => Promise<void>): void;
   cleanup(): void;
 }
 
@@ -55,6 +56,7 @@ export function installFakeSuperserve(): FakeSuperserve {
   let clock = 0;
   let listFailure: Error | null = null;
   let runHook: (() => Promise<void>) | null = null;
+  let infoHook: (() => Promise<void>) | null = null;
   let killFailure: Error | null = null;
   let pausedNetworkUpdates = false;
   let silentlyIgnorePausedNetwork = false;
@@ -196,6 +198,9 @@ export function installFakeSuperserve(): FakeSuperserve {
       return session(r);
     },
     async info(sandboxId, scopeMetadata): Promise<SuperserveSandboxInfo> {
+      const hook = infoHook;
+      infoHook = null;
+      if (hook) await hook();
       const r = records.get(sandboxId);
       const matches = Object.entries(scopeMetadata ?? {}).every(([k, v]) => r?.metadata[k] === v);
       if (!r || r.expired || !matches) throw new SuperserveSandboxGoneError(sandboxId, "sandbox was not found");
@@ -252,6 +257,9 @@ export function installFakeSuperserve(): FakeSuperserve {
     },
     beforeNextRun: (hook) => {
       runHook = hook;
+    },
+    beforeNextInfo: (hook) => {
+      infoHook = hook;
     },
     failNextKill: (error) => {
       killFailure = error;

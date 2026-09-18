@@ -1,5 +1,6 @@
+import { initializeAnalytics, capturePageview, stopAnalytics } from "./product-analytics";
 import { captureConnectionReturn } from "./connection-return";
-import { openModelConnectManager, renderModelConnectGate } from "./model-connect";
+import { renderModelConnectGate } from "./model-connect";
 import { html, nothing, render, type TemplateResult } from "lit";
 import {
   Box,
@@ -221,6 +222,7 @@ const ICON = {
 };
 
 export async function signOut(): Promise<void> {
+  stopAnalytics();
   const portal = authMode === "portal";
   if (!portal) {
     try {
@@ -438,6 +440,7 @@ export type AuthGate =
   | { kind: "dev"; value?: string; error?: string; pending?: boolean };
 
 export function renderAuthGate(gate: AuthGate): void {
+  stopAnalytics();
   shellMounted = false;
   const body = (() => {
     switch (gate.kind) {
@@ -561,7 +564,6 @@ export function renderSidebarFooter(): void {
         ${
           userMenuOpen
             ? html`<div class="session-menu-popover user-menu-popover" role="menu">
-                ${appState.me?.individualModelAuth ? html`<button class="session-menu-option" type="button" role="menuitem" @click=${openModelConnectManager}>Manage AI account</button>` : nothing}
                 <button class="session-menu-option" type="button" role="menuitem" @click=${signOutFromMenu}>
                   ${icon(LogOut, 15)}<span>Sign out</span>
                 </button>
@@ -632,7 +634,7 @@ export function renderSidebarTop(): void {
           startNewChatInLastScope();
         })}
       </div>
-      ${sessionSelectionBar() ?? html` <div class="section-label recents-label"><span>Sessions</span></div> `}
+      ${sessionSelectionBar() ?? nothing}
     `,
     appState.topEl,
   );
@@ -678,6 +680,7 @@ export function switchView(v: View): void {
     return;
   }
   appState.currentView = v;
+  capturePageview(v);
   appState.viewRenderSeq++;
   sessionsState.openMenuId = null;
   sessionsState.renamingId = null;
@@ -1031,6 +1034,7 @@ export async function boot(): Promise<void> {
   }
   resetKeychainState();
   appState.me = (await r.json()) as Me;
+  void initializeAnalytics(appState.me, isView(wanted) && canView(wanted) ? wanted : "chats");
   authMode = appState.me.mode ?? "portal";
   clearPortalAttempt();
   if (appState.me.individualModelAuth && !appState.me.modelAuthConnected) {

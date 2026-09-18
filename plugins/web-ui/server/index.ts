@@ -1,3 +1,5 @@
+import "./instrument.ts";
+import { flushErrorReporting, reportBackendError } from "../../chassis/src/error-reporting.ts";
 import { appEditSlug } from "../src/app-edit.ts";
 import { composioCallbackUrl } from "./composio-return.ts";
 import { sharedSessionHtml } from "./shared-session.ts";
@@ -172,13 +174,30 @@ const CONTENT_TYPES: Record<string, string> = {
   ".wasm": "application/wasm",
 };
 
+const analyticsKey = process.env.POSTHOG_API_KEY?.trim();
+if (analyticsKey && !/^phc_[A-Za-z0-9]+$/.test(analyticsKey))
+  throw new Error("POSTHOG_API_KEY must be a public project ingestion token");
+const analyticsHost = new URL((analyticsKey && process.env.POSTHOG_HOST?.trim()) || "https://us.i.posthog.com");
+if (
+  analyticsKey &&
+  (analyticsHost.protocol !== "https:" ||
+    analyticsHost.username ||
+    analyticsHost.password ||
+    analyticsHost.search ||
+    analyticsHost.hash ||
+    analyticsHost.pathname !== "/")
+) {
+  throw new Error("POSTHOG_HOST must be an HTTPS origin");
+}
+const analyticsConfig = analyticsKey ? { apiKey: analyticsKey, host: analyticsHost.origin } : undefined;
+
 const SPA_CSP = [
   "default-src 'self'",
   "script-src 'self' 'wasm-unsafe-eval'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https:",
   "font-src 'self' data:",
-  "connect-src 'self'",
+  `connect-src 'self'${analyticsConfig ? ` ${analyticsConfig.host}` : ""}`,
   "frame-src 'self' data: https:",
   "worker-src 'self' blob:",
   "frame-ancestors 'self'",
@@ -1099,6 +1118,19 @@ const apiRoutes: readonly WebRoute[] = [
   },
   {
     method: "POST",
+    path: "/api/user-model-auth/account",
+    handle: async (c) => {
+      const p = JSON.parse((await readBody(c.req)) || "{}") as { account?: unknown; provider?: unknown };
+      return relayCore(
+        c.res,
+        "POST",
+        "/v1/user-model-auth/account",
+        JSON.stringify({ principalId: c.user, account: p.account, provider: p.provider }),
+      );
+    },
+  },
+  {
+    method: "POST",
     path: "/api/user-model-auth/api-key",
     handle: async (c) => {
       const p = JSON.parse((await readBody(c.req)) || "{}") as { provider?: unknown; apiKey?: unknown };
@@ -1215,6 +1247,7 @@ const apiRoutes: readonly WebRoute[] = [
       }
       const parsed = JSON.parse(authStatus.text) as {
         individualModelAuth?: boolean;
+        account?: string;
         connections?: { provider: string }[];
       };
       const permissions = allPermissions.filter((permission) => permission !== "loops" && permission !== "inbox");
@@ -1224,10 +1257,14 @@ const apiRoutes: readonly WebRoute[] = [
         user,
         org: ORG,
         companyName: companyBranding.orgName?.trim() || null,
+        ...(analyticsConfig && !resolveIdentity(req)?.impersonator ? { analytics: analyticsConfig } : {}),
         mode: AUTH_MODE,
         slackWorkspaceUrl: workspaceUrl,
         individualModelAuth: parsed.individualModelAuth === true,
-        modelAuthConnected: (parsed.connections?.length ?? 0) > 0,
+        modelAuthConnected:
+          parsed.connections?.some(
+            (c) => !parsed.account || parsed.account === "personal" || parsed.account === c.provider,
+          ) ?? false,
         impersonatedBy: resolveIdentity(req)?.impersonator ?? null,
         displayName: resolveIdentity(req)?.name ?? null,
         ...(welcomeCohort ? { welcomeCohort } : {}),
@@ -2386,6 +2423,7 @@ const apiRoutes: readonly WebRoute[] = [
         threadRef?: unknown;
         scopeId?: unknown;
         channelName?: unknown;
+        queuedRunId?: unknown;
       }>(req, res, false);
       if (!p) return;
       const kind = typeof p.kind === "string" ? p.kind : "";
@@ -2408,7 +2446,12 @@ const apiRoutes: readonly WebRoute[] = [
         res,
         "POST",
         `/v1/runs/${encodeURIComponent(id)}/signal`,
-        JSON.stringify({ kind, ...(text !== undefined ? { text } : {}), ...steerFields }),
+        JSON.stringify({
+          kind,
+          ...(text !== undefined ? { text } : {}),
+          ...steerFields,
+          ...(typeof p.queuedRunId === "string" ? { queuedRunId: p.queuedRunId } : {}),
+        }),
       );
     },
   },
@@ -3067,6 +3110,7 @@ export const handler = async (req: IncomingMessage, res: ServerResponse) => {
 
 const server = createServer((req, res) => {
   void handler(req, res).catch((err: unknown) => {
+    reportBackendError(err);
     console.error("%s", `[web-ui] 502 ${req.method ?? "?"} ${req.url ?? "?"}:`, String(err));
     if (!res.headersSent) json(res, 502, { error: "bad_gateway", message: "upstream error" });
     else res.end();
@@ -3091,8 +3135,10 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
         void runInboxFeed();
       });
     })
-    .catch((err: unknown) => {
+    .catch(async (err: unknown) => {
+      reportBackendError(err);
       console.error("[web-ui] failed to start:", String(err));
+      await flushErrorReporting();
       process.exit(1);
     });
 }

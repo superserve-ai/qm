@@ -48,13 +48,7 @@ export function createMemoryRunStore(opts?: { maxClaims?: number }): MemoryRunti
   const store: RunStore = {
     ...(Number.isFinite(maxClaims) ? { maxClaims } : {}),
 
-    async enqueue({
-      sessionId,
-      request,
-      dedupKey,
-      maxAttempts = 3,
-      idleDelivery,
-    }: EnqueueInput): Promise<EnqueueResult> {
+    async enqueue({ sessionId, request, dedupKey, maxAttempts = 3 }: EnqueueInput): Promise<EnqueueResult> {
       if (dedupKey) {
         const existingId = byKey.get(dedupKey);
         if (existingId) {
@@ -62,15 +56,6 @@ export function createMemoryRunStore(opts?: { maxClaims?: number }): MemoryRunti
           if (existing) return { run: existing, deduped: true };
         }
       }
-      if (
-        idleDelivery &&
-        ![...runs.values()].some(
-          (run) =>
-            !isTerminal(run.status) &&
-            (run.sessionId === idleDelivery.threadRef || run.sessionId.startsWith(`${idleDelivery.threadRef}:`)),
-        )
-      )
-        request = { ...request, deliveryTarget: idleDelivery.target };
       const run: Run = {
         id: randomUUID(),
         sessionId,
@@ -240,6 +225,24 @@ export function createMemoryRunStore(opts?: { maxClaims?: number }): MemoryRunti
       runs.delete(runId);
       retryAfter.delete(runId);
       if (run.dedupKey) byKey.delete(run.dedupKey);
+      return true;
+    },
+
+    async steerQueued(queuedRunId, targetRunId, signal, signals) {
+      const queued = runs.get(queuedRunId);
+      const target = runs.get(targetRunId);
+      if (!queued || queued.status !== "pending" || !target || isTerminal(target.status) || queuedRunId === targetRunId)
+        return false;
+      if ((queued.request.displayText ?? queued.request.text) !== signal.request?.text) return false;
+      runs.delete(queuedRunId);
+      try {
+        await signals.send(targetRunId, signal);
+      } catch (error) {
+        runs.set(queuedRunId, queued);
+        throw error;
+      }
+      retryAfter.delete(queuedRunId);
+      if (queued.dedupKey) byKey.delete(queued.dedupKey);
       return true;
     },
 

@@ -24,7 +24,7 @@ The provisioner must configure the Cloud Run service with CPU always allocated (
 Failure and shutdown:
 
 - If any child exits, the supervisor sends `SIGTERM` to the rest and exits `1`; Cloud Run restarts the container. Stragglers are `SIGKILL`ed after 3 s, or after core's full drain and lease-release window when core is one of them.
-- On `SIGTERM`/`SIGINT` the supervisor signals core first and keeps portal and web-ui serving until core has exited, so in-flight public requests are not reset while runs drain. Core drains workers for `SHUTDOWN_DRAIN_MS` (image default `1000`); if that stop wedges, core's own backstop fires 5 s later and it then spends up to 3 s releasing in-flight run leases. The supervisor waits for that whole sequence plus 1 s before `SIGKILL`, then exits `0`. Keep `SHUTDOWN_DRAIN_MS` at least 9 s under the service's termination grace period so the lease release completes before the platform kills the container; Cloud Run defaults to 10 s, which is why the image ships `1000`.
+- On `SIGTERM`/`SIGINT` the supervisor signals core first and keeps portal and web-ui serving until core has exited, so in-flight public requests are not reset while runs drain. Core drains workers for `SHUTDOWN_DRAIN_MS` (image default `1000`); if that stop wedges, core's own backstop fires 5 s later and it then spends up to 3 s releasing in-flight run leases. Core then allows up to 2 s to flush error reporting. The supervisor waits for that whole sequence plus 1 s before `SIGKILL`, then exits `0`. Allow at least `SHUTDOWN_DRAIN_MS + 11000` ms of platform termination grace (12 s with the image default). A platform with a shorter fixed grace period can interrupt the final shutdown steps.
 - The supervisor logs child lifecycle events only, prefixed `[tenant]`. It never prints environment values.
 
 Core and web-ui do not read a bind address from their environment (`server.listen(PORT)` in `src/index.ts` and `plugins/web-ui/server/index.ts`), so the supervisor preloads `scripts/qm-tenant-loopback.mjs` into those two children. It rewrites any `listen(port)` without an explicit host to `127.0.0.1`. Portal is started without the shim.
@@ -33,7 +33,7 @@ Core and web-ui do not read a bind address from their environment (`server.liste
 
 Values are read from the container environment. The supervisor derives the loopback wiring and the embedded-broker OIDC settings itself and only fills a derived value when the variable is not already set, so a provisioner can override any of them. Secret names come from `cli/src/secrets.ts` and `src/deployment/secret-schema.ts`; runtime behaviour from `src/config.ts`, `plugins/portal/src/index.ts`, `plugins/web-ui/server/index.ts` and `plugins/auth/src/config.ts`.
 
-Web-ui and portal receive an allowlisted subset of the environment (their own `WEB_UI_*`/`ADMIN_*`/`PORTAL_*`/`OIDC_*`/`AUTH_*`/`SMTP_*` variables, the two shared signing secrets, and process basics such as `PATH`, `HOME`, `NODE_ENV`, proxy settings). Model keys, `DATABASE_URL`, sandbox tokens and every other core secret stay in the core process.
+Web-ui and portal receive an allowlisted subset of the environment (their own `WEB_UI_*`/`ADMIN_*`/`PORTAL_*`/`OIDC_*`/`AUTH_*`/`SMTP_*` variables, the two shared signing secrets, and process basics such as `PATH`, `HOME`, `NODE_ENV`, proxy settings). The reporting settings `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, `SENTRY_DEPLOYMENT`, and `SENTRY_RELEASE` reach all services; `POSTHOG_API_KEY` and `POSTHOG_HOST` reach core and web-ui. Model keys, `DATABASE_URL`, sandbox tokens and build credentials such as `SENTRY_AUTH_TOKEN` stay out of the surface processes.
 
 ### Supervisor
 
@@ -49,9 +49,9 @@ Web-ui and portal receive an allowlisted subset of the environment (their own `W
 
 The three port variables must each be a TCP port between 1 and 65535 and must differ from one
 another; `8099` is reserved as well, but only while the embedded broker is running. The two
-millisecond variables must fit a Node timer, and `SHUTDOWN_DRAIN_MS` leaves room for the nine
+millisecond variables must fit a Node timer, and `SHUTDOWN_DRAIN_MS` leaves room for the eleven
 seconds the supervisor adds on top so core can finish its own backstop and release in-flight
-run leases. The supervisor rejects anything else at startup with exit code 2 rather than
+run leases and flush error reporting. The supervisor rejects anything else at startup with exit code 2 rather than
 booting into a readiness timeout or killing core mid-drain.
 
 ### Shared identity and signing secrets

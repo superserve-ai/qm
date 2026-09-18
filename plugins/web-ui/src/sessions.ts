@@ -339,12 +339,16 @@ export function renderList(): void {
       ${
         pinned.length
           ? html`
-              <div class="recents-group pinned-head">${icon(Pin, 11)}<span>Pinned</span></div>
-              ${repeat(
-                pinned,
-                (session) => session.threadRef,
-                (session) => sessionRow(session),
-              )}
+              <div class="recents-group pinned-head">
+                <span class="pinned-head-glyph">${icon(Pin, 11)}</span><span>Pinned</span>
+              </div>
+              <div class="pinned-children">
+                ${repeat(
+                  pinned,
+                  (session) => session.threadRef,
+                  (session) => sessionRow(session),
+                )}
+              </div>
             `
           : nothing
       }
@@ -715,11 +719,9 @@ function isActiveRow(s: CoreSession): boolean {
 
 function chatPageRow(s: CoreSession): TemplateResult {
   const readOnly = !isContinuable(s, appState.me?.user ?? "");
+  const color = displaySessionColor(s.color);
   return html`
-    <div
-      class="list-row chat-row ${s.color ? "colored" : ""}"
-      style=${s.color ? `--session-color:${s.color}` : nothing}
-    >
+    <div class="list-row chat-row ${color ? "colored" : ""}" style=${color ? `--session-color:${color}` : nothing}>
       <a
         class="chat-row-open"
         href=${deepLinkPath(UI_BASE, "chats", s.id)}
@@ -871,6 +873,7 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
   const surface = surfaceOf(s);
   const context = projectChild ? null : rowContext(s);
   const working = sessionWorking(s);
+  const color = displaySessionColor(s.color);
   let titleContent: string | TemplateResult = groupDmTitle(s);
   if (refreshingTitle) {
     titleContent = html`<span class="sheen-label title-sheen thinking-sheen" data-sheen=${title}>${title}</span>`;
@@ -893,8 +896,8 @@ function sessionRow(s: CoreSession, projectChild = false): TemplateResult {
   return html`
     <div
       data-session-id=${saved ? s.id : nothing}
-      class="session-row ${active ? "active" : ""} ${saved && selection.ids.has(s.id) ? "selected" : ""} ${menuOpen ? "menu-open" : ""} ${readOnly ? "read-only" : ""} ${refreshingTitle ? "title-refreshing" : ""} ${working ? "working" : ""} ${s.awaitingInput ? "awaiting-input" : ""} ${projectChild ? "project-child" : ""} ${s.color ? "colored" : ""}"
-      style=${s.color ? `--session-color:${s.color}` : nothing}
+      class="session-row ${active ? "active" : ""} ${saved && selection.ids.has(s.id) ? "selected" : ""} ${menuOpen ? "menu-open" : ""} ${readOnly ? "read-only" : ""} ${refreshingTitle ? "title-refreshing" : ""} ${working ? "working" : ""} ${s.awaitingInput ? "awaiting-input" : ""} ${projectChild ? "project-child" : ""} ${color ? "colored" : ""}"
+      style=${color ? `--session-color:${color}` : nothing}
     >
       <a
         class="session"
@@ -1102,10 +1105,24 @@ function sessionMenuPopover(s: CoreSession): TemplateResult {
   `;
 }
 
-const SESSION_COLORS = ["#ef4444", "#f59e0b", "#22c55e", "#3b82f6", "#a855f7", "#ec4899"] as const;
+const SESSION_COLORS = ["#f43f5e", "#f59e0b", "#10b981", "#3b82f6", "#8b5cf6", "#ec4899"] as const;
+const LEGACY_SESSION_COLORS = new Map([
+  ["#ef4444", SESSION_COLORS[0]],
+  ["#f59e0b", SESSION_COLORS[1]],
+  ["#22c55e", SESSION_COLORS[2]],
+  ["#3b82f6", SESSION_COLORS[3]],
+  ["#a855f7", SESSION_COLORS[4]],
+  ["#ec4899", SESSION_COLORS[5]],
+]);
+
+function displaySessionColor(color: string | null | undefined): string | null {
+  if (!color) return null;
+  const normalized = color.toLowerCase();
+  return LEGACY_SESSION_COLORS.get(normalized) ?? normalized;
+}
 
 function sessionColorRow(s: CoreSession): TemplateResult {
-  const current = s.color?.toLowerCase() ?? null;
+  const current = displaySessionColor(s.color);
   const isPreset = SESSION_COLORS.includes(current as (typeof SESSION_COLORS)[number]);
   return html`
     <div class="session-menu-colors" role="group" aria-label="Row color">
@@ -1125,7 +1142,7 @@ function sessionColorRow(s: CoreSession): TemplateResult {
         <input
           type="color"
           aria-label="Custom row color"
-          value=${current ?? "#6366f1"}
+          value=${current ?? SESSION_COLORS[3]}
           @click=${(e: Event) => e.stopPropagation()}
           @input=${(e: InputEvent) => previewColor(s, (e.currentTarget as HTMLInputElement).value)}
           @change=${(e: Event) => setColor(s, (e.currentTarget as HTMLInputElement).value)}

@@ -1,6 +1,6 @@
-import { test, after, beforeEach } from "node:test";
+import { test, afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -14,6 +14,8 @@ import { sandboxScopeName } from "../src/sandbox/exec-sandbox-base.ts";
 import { createLocalWorkspaceStore } from "../src/workspace/workspace-store.ts";
 import { supportsProcessSessions, computerVerdict } from "../src/sandbox/sandbox.ts";
 import { createMemoryMap, type DurableMap } from "../src/persistence/durable-map.ts";
+import { createMemoryAdvisoryLock } from "../src/persistence/advisory-lock.ts";
+import { setTimeout as delay } from "node:timers/promises";
 import { scopeId } from "../src/types.ts";
 import { shq } from "../src/util/shell.ts";
 import { installFakeSuperserve, type FakeSuperserve } from "./support/fake-superserve.ts";
@@ -21,12 +23,19 @@ import type { Sandbox } from "../src/sandbox/sandbox.ts";
 
 let fake: FakeSuperserve;
 let sandbox: Sandbox;
+const workspaceRoots: string[] = [];
+
+function newWorkspace() {
+  const root = mkdtempSync(join(tmpdir(), "superserve-ws-"));
+  workspaceRoots.push(root);
+  return createLocalWorkspaceStore(root);
+}
 const scope = scopeId("personal", "tester");
 const layers = [{ scopeId: scope, mountPath: "/", mode: "rw" as const }];
 const scopeName = (): string => sandboxScopeName("qmt", scope);
 
 function make(extra: Record<string, unknown> = {}): Sandbox {
-  return createSuperserveSandbox(createLocalWorkspaceStore(mkdtempSync(join(tmpdir(), "superserve-ws-"))), {
+  return createSuperserveSandbox(newWorkspace(), {
     client: fake.client,
     namePrefix: "qmt",
     ...extra,
@@ -37,7 +46,10 @@ beforeEach(() => {
   fake = installFakeSuperserve();
   sandbox = make();
 });
-after(() => fake?.cleanup());
+afterEach(() => {
+  fake?.cleanup();
+  for (const root of workspaceRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 test("profile advertises resident disk, process sessions, and the template's toolchain", () => {
   assert.equal(sandbox.profile.backend, "superserve");
@@ -103,26 +115,26 @@ test("provision creates one sandbox per scope with scope metadata and lifecycle 
   assert.equal(record.autoDeleteSeconds, 30 * 24 * 3600);
 });
 
-test("home is discovered from the guest, not assumed", async () => {
+test("the default HOME and workspace paths match the template", async () => {
   const h = await sandbox.provision(layers);
   assert.equal(h.homeDir, "/root");
   assert.equal(h.rootDir, "/root/workspace");
 });
 
 test("egress allow/deny lists are applied at create time", async () => {
-  sandbox = make({ egressAllow: ["api.anthropic.com", "*.github.com"], egressDeny: ["0.0.0.0/0"] });
+  sandbox = make({ egressAllow: ["api.example.com", "*.github.com"], egressDeny: ["0.0.0.0/0"] });
   await sandbox.provision(layers);
   assert.deepEqual(fake.current(scopeName())?.network, {
-    allowOut: ["api.anthropic.com", "*.github.com"],
+    allowOut: ["api.example.com", "*.github.com"],
     denyOut: ["0.0.0.0/0"],
   });
 });
 
 test("a paused sandbox is resumed as-is when the egress policy is unchanged", async () => {
-  sandbox = make({ egressDeny: ["0.0.0.0/0"], egressAllow: ["api.anthropic.com"] });
+  sandbox = make({ egressDeny: ["0.0.0.0/0"], egressAllow: ["api.example.com"] });
   const h = await sandbox.provision(layers);
   await sandbox.teardown(h);
-  const again = make({ egressDeny: ["0.0.0.0/0"], egressAllow: ["api.anthropic.com"] });
+  const again = make({ egressDeny: ["0.0.0.0/0"], egressAllow: ["api.example.com"] });
   await again.provision(layers);
   assert.equal(fake.createdCount(scopeName()), 1);
   assert.equal(fake.current(scopeName())?.status, "active");
@@ -139,14 +151,14 @@ test("a paused sandbox under a different egress policy is destroyed and replaced
 
   const tightened = make({
     egressDeny: ["0.0.0.0/0"],
-    egressAllow: ["api.anthropic.com"],
+    egressAllow: ["api.example.com"],
     onError: (e: { category: string; code: string }) => errors.push(`${e.category}:${e.code}`),
   });
   const replaced = await tightened.provision(layers);
   assert.equal(replaced.coldStart, true);
   assert.equal(fake.createdCount(scopeName()), 2);
   assert.notEqual(fake.current(scopeName())!.id, oldId);
-  assert.deepEqual(fake.current(scopeName())?.network, { allowOut: ["api.anthropic.com"], denyOut: ["0.0.0.0/0"] });
+  assert.deepEqual(fake.current(scopeName())?.network, { allowOut: ["api.example.com"], denyOut: ["0.0.0.0/0"] });
   assert.equal(fake.calls().indexOf(`connect:${oldId}`, fake.calls().indexOf(`pause:${oldId}`)), -1, "never resumed");
   assert.ok(fake.calls().includes(`kill:${oldId}`));
   assert.deepEqual(errors, ["sandbox_egress:policy_changed"]);
@@ -173,8 +185,8 @@ test("a paused sandbox that predates egress stamping keeps its disk when the pol
   assert.ok(fake.current(scopeName())!.metadata[SUPERSERVE_METADATA.egress], "and it is stamped on adoption");
 });
 
-test("the provider's network decides the policy, not the sandbox's own stamp", async () => {
-  sandbox = make({ egressDeny: ["0.0.0.0/0"], egressAllow: ["api.anthropic.com"] });
+test("network reconciliation reads the actual policy independently of metadata", async () => {
+  sandbox = make({ egressDeny: ["0.0.0.0/0"], egressAllow: ["api.example.com"] });
   const h = await sandbox.provision(layers);
   await sandbox.teardown(h);
   const record = fake.current(scopeName())!;
@@ -183,7 +195,7 @@ test("the provider's network decides the policy, not the sandbox's own stamp", a
   record.network = { allowOut: ["evil.example.com"], denyOut: [] };
   fake.pause(scopeName());
 
-  const again = make({ egressDeny: ["0.0.0.0/0"], egressAllow: ["api.anthropic.com"] });
+  const again = make({ egressDeny: ["0.0.0.0/0"], egressAllow: ["api.example.com"] });
   await again.provision(layers);
   assert.equal(
     fake.current(scopeName())!.metadata[SUPERSERVE_METADATA.egress],
@@ -192,10 +204,10 @@ test("the provider's network decides the policy, not the sandbox's own stamp", a
   );
   assert.notEqual(fake.current(scopeName())!.id, stampedId, "but drifted network state is caught anyway");
   assert.ok(fake.calls().includes(`kill:${stampedId}`));
-  assert.deepEqual(fake.current(scopeName())?.network, { allowOut: ["api.anthropic.com"], denyOut: ["0.0.0.0/0"] });
+  assert.deepEqual(fake.current(scopeName())?.network, { allowOut: ["api.example.com"], denyOut: ["0.0.0.0/0"] });
 });
 
-test("a paused sandbox keeps its disk when the provider accepts the policy change without resuming", async () => {
+test("a paused sandbox keeps its disk when its policy can be updated without resuming", async () => {
   const store: DurableMap<StoredSuperserveSandbox> = createMemoryMap();
   fake.acceptNetworkUpdateWhilePaused();
   sandbox = make({ store });
@@ -205,11 +217,11 @@ test("a paused sandbox keeps its disk when the provider accepts the policy chang
   fake.pause(scopeName());
   const keptId = fake.current(scopeName())!.id;
 
-  const tightened = make({ store, egressDeny: ["0.0.0.0/0"], egressAllow: ["api.anthropic.com"] });
+  const tightened = make({ store, egressDeny: ["0.0.0.0/0"], egressAllow: ["api.example.com"] });
   const adopted = await tightened.provision(layers);
   assert.equal(fake.createdCount(scopeName()), 1, "a routine policy change never destroys the disk");
   assert.equal(fake.current(scopeName())!.id, keptId);
-  assert.deepEqual(fake.current(scopeName())?.network, { allowOut: ["api.anthropic.com"], denyOut: ["0.0.0.0/0"] });
+  assert.deepEqual(fake.current(scopeName())?.network, { allowOut: ["api.example.com"], denyOut: ["0.0.0.0/0"] });
   assert.equal(await tightened.readFile(adopted, "resident.txt"), "months of work\n");
   const calls = fake.calls();
   assert.ok(
@@ -218,7 +230,7 @@ test("a paused sandbox keeps its disk when the provider accepts the policy chang
   );
 });
 
-test("a policy update the provider silently drops never resumes the sandbox under the old policy", async () => {
+test("an unapplied policy update prevents resuming the sandbox under the old policy", async () => {
   fake.ignoreNetworkUpdateWhilePaused();
   const errors: string[] = [];
   sandbox = make();
@@ -229,7 +241,7 @@ test("a policy update the provider silently drops never resumes the sandbox unde
 
   const tightened = make({
     egressDeny: ["0.0.0.0/0"],
-    egressAllow: ["api.anthropic.com"],
+    egressAllow: ["api.example.com"],
     onError: (e: { category: string; code: string }) => errors.push(`${e.category}:${e.code}`),
   });
   await tightened.provision(layers);
@@ -241,7 +253,7 @@ test("a policy update the provider silently drops never resumes the sandbox unde
 
 test("a cached sandbox whose network drifted is reconciled before the next command", async () => {
   const store: DurableMap<StoredSuperserveSandbox> = createMemoryMap();
-  sandbox = make({ store, egressDeny: ["0.0.0.0/0"], egressAllow: ["api.anthropic.com"] });
+  sandbox = make({ store, egressDeny: ["0.0.0.0/0"], egressAllow: ["api.example.com"] });
   const h = await sandbox.provision(layers);
   const id = fake.current(scopeName())!.id;
   fake.current(scopeName())!.network = { allowOut: ["evil.example.com"], denyOut: [] };
@@ -251,7 +263,7 @@ test("a cached sandbox whose network drifted is reconciled before the next comma
   assert.equal(fake.current(scopeName())!.id, id);
   assert.deepEqual(
     fake.current(scopeName())?.network,
-    { allowOut: ["api.anthropic.com"], denyOut: ["0.0.0.0/0"] },
+    { allowOut: ["api.example.com"], denyOut: ["0.0.0.0/0"] },
     "drift on a cached session is repaired rather than trusted",
   );
   assert.equal((await sandbox.run(h, "echo ok")).stdout.trim(), "ok");
@@ -276,10 +288,10 @@ test("an active sandbox gets a changed egress policy applied before its first co
   await sandbox.teardown(h, { keepWarm: true });
   const id = fake.current(scopeName())!.id;
 
-  const tightened = make({ egressDeny: ["0.0.0.0/0"], egressAllow: ["api.anthropic.com"] });
+  const tightened = make({ egressDeny: ["0.0.0.0/0"], egressAllow: ["api.example.com"] });
   await tightened.provision(layers);
   assert.equal(fake.createdCount(scopeName()), 1);
-  assert.deepEqual(fake.current(scopeName())?.network, { allowOut: ["api.anthropic.com"], denyOut: ["0.0.0.0/0"] });
+  assert.deepEqual(fake.current(scopeName())?.network, { allowOut: ["api.example.com"], denyOut: ["0.0.0.0/0"] });
   const calls = fake.calls();
   const connectAt = calls.lastIndexOf(`connect:${id}`);
   const policyAt = calls.lastIndexOf(`update:${id}`, connectAt);
@@ -369,7 +381,61 @@ test("provisioning the same scope twice reuses the sandbox", async () => {
   assert.equal(fake.createdCount(scopeName()), 1);
 });
 
-test("teardown leaves the sandbox to the provider's idle pause; a paused sandbox resumes with its disk intact", async () => {
+test("concurrent cores serialize read-only layer preparation", async () => {
+  const workspace = newWorkspace();
+  const shared = scopeId("org", "shared");
+  await workspace.write(shared, "policy.txt", "current");
+  const layered = [...layers, { scopeId: shared, mountPath: "global", mode: "ro" as const }];
+  const advisoryLock = createMemoryAdvisoryLock();
+  let writes = 0;
+  let overlappingWrites = false;
+  const wrap = (session: Awaited<ReturnType<typeof fake.client.create>>) => ({
+    ...session,
+    async writeFileBytes(path: string, data: Uint8Array): Promise<void> {
+      if (!path.endsWith(".ro-layers.tar")) return session.writeFileBytes(path, data);
+      overlappingWrites ||= writes > 0;
+      writes += 1;
+      try {
+        await session.writeFileBytes(path, data);
+        await delay(100);
+      } finally {
+        writes -= 1;
+      }
+    },
+  });
+  const client = {
+    ...fake.client,
+    create: async (...args: Parameters<typeof fake.client.create>) => wrap(await fake.client.create(...args)),
+    connect: async (...args: Parameters<typeof fake.client.connect>) => wrap(await fake.client.connect(...args)),
+  };
+  const first = createSuperserveSandbox(workspace, { client, advisoryLock, configEpoch: 1 });
+  const second = createSuperserveSandbox(workspace, { client, advisoryLock, configEpoch: 1 });
+  const results = await Promise.allSettled([first.provision(layered), second.provision(layered)]);
+  assert.equal(overlappingWrites, false, "each core owns the shared archive until extraction finishes");
+  assert.deepEqual(
+    results.map((result) => result.status),
+    ["fulfilled", "fulfilled"],
+  );
+});
+
+test("an older core leaves newer read-only layers intact", async () => {
+  const olderWorkspace = newWorkspace();
+  const newerWorkspace = newWorkspace();
+  const shared = scopeId("org", "shared");
+  await olderWorkspace.write(shared, "policy.txt", "old");
+  await newerWorkspace.write(shared, "policy.txt", "new");
+  const layered = [...layers, { scopeId: shared, mountPath: "global", mode: "ro" as const }];
+  const advisoryLock = createMemoryAdvisoryLock();
+  const older = createSuperserveSandbox(olderWorkspace, { client: fake.client, advisoryLock, configEpoch: 1 });
+  const newer = createSuperserveSandbox(newerWorkspace, { client: fake.client, advisoryLock, configEpoch: 2 });
+  await older.provision(layered);
+  const upgraded = await newer.provision(layered);
+  const held = await older.provision(layered);
+  assert.equal(await newer.readFile(upgraded, "global/policy.txt"), "new");
+  assert.equal((await older.run(held, "cat global/policy.txt")).stdout, "new");
+});
+
+test("teardown preserves the sandbox until automatic pause; resume preserves its disk", async () => {
   const h = await sandbox.provision(layers);
   await sandbox.writeFile(h, "keep.txt", "still here\n");
   await sandbox.teardown(h);
@@ -645,7 +711,7 @@ test("reconnecting keeps a longer keep-warm timeout until a plain teardown resto
   assert.equal(fake.current(scopeName())?.timeoutSeconds, 600);
 });
 
-test("keepWarm teardown extends the provider idle pause; a plain teardown restores it", async () => {
+test("keepWarm teardown extends the active-time limit; a plain teardown restores it", async () => {
   sandbox = make({ idlePauseSec: 600, keepWarmSec: 5400 });
   const h = await sandbox.provision(layers);
   assert.equal(fake.current(scopeName())?.timeoutSeconds, 600);
@@ -832,11 +898,7 @@ test("the last scratch handle to close kills the replacement even when it was pr
   const first = await sandbox.provision(layers, { scratch: { key: "k1" } });
   fake.expire(first.id);
   const replacement = await sandbox.provision(layers, { scratch: { key: "k1" } });
-  assert.equal(
-    replacement.coldStart,
-    true,
-    "a scratch sandbox deleted provider-side is recreated on the next provision",
-  );
+  assert.equal(replacement.coldStart, true, "a deleted scratch sandbox is recreated on the next provision");
   assert.notEqual(fake.current(first.id), null);
 
   await sandbox.teardown(replacement);
@@ -898,4 +960,12 @@ test("a sandbox is not cached when its durable record cannot be written", async 
   assert.ok(await inner.get(scope), "record written on the retry");
   assert.equal((await inner.get(scope))?.sandboxId, fake.current(scopeName())?.id);
   assert.equal((await sandbox.run(h, "echo ok")).stdout.trim(), "ok");
+});
+
+test("run refuses to execute when its workspace directory is missing", async () => {
+  const handle = await sandbox.provision(layers);
+  rmSync(join(fake.homeDir(scopeName()), "workspace"), { recursive: true });
+  const result = await sandbox.run(handle, "echo should-not-run");
+  assert.notEqual(result.code, 0);
+  assert.equal(result.stdout, "");
 });

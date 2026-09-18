@@ -1498,7 +1498,7 @@ function validateSandbox(raw: unknown, path: string, target: Target): SandboxCon
       o["backend"] !== "superserve"
     ) {
       throw new CliError(
-        `${path}: "sandbox.backend" must be "local" (Docker containers on the deployment host), "sprites" (Fly Sprites), "aws" (Lambda MicroVM sandboxes), "agent37", or "superserve" (Superserve Firecracker microVMs)`,
+        `${path}: "sandbox.backend" must be "local" (Docker containers on the deployment host), "sprites" (Fly Sprites), "aws" (Lambda MicroVM sandboxes), "agent37", or "superserve" (Superserve sandboxes)`,
       );
     }
     out.backend = o["backend"];

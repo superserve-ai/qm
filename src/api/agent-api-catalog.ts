@@ -607,7 +607,8 @@ const FAMILIES: AgentApiFamily[] = [
       {
         method: "POST|GET",
         path: "/v1/keychain/asks",
-        summary: "ask a credential's owner for access (purpose-bound; refused on trigger-fired turns) / list asks",
+        summary:
+          "ask a credential's owner for access, including scheduled turns in personal or shared conversations for discoverable credentials (no access until owner approval) / list asks",
       },
       { method: "POST", path: "/v1/keychain/asks/:id/decline", summary: "decline an ask" },
       {

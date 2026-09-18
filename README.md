@@ -242,6 +242,7 @@ upstream source history to merge.
 - [`cli/README.md`](./cli/README.md) — the `qm` CLI and the deployment directory contract
 - [`docs/deploy-directory.md`](./docs/deploy-directory.md) — the deployment directory in full
 - [`docs/porter.md`](./docs/porter.md) — running qm on Porter
+- [`docs/superserve.md`](./docs/superserve.md) — using Superserve for agent sandboxes
 - [`.env.example`](./.env.example) — every knob, documented in place
 - [`plugins/`](./plugins) — the surfaces (Slack, web UI, admin, portal)
 

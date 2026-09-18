@@ -1,3 +1,4 @@
+import { withDocumentInputs, type DocumentModel } from "./document-inputs.ts";
 import { gatewayModelsJson, gatewayModelsVersion } from "../model/gateway-models.ts";
 import { Type } from "typebox";
 import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -719,29 +720,46 @@ export function seedRawMessagesIntoSession(session: unknown, messages: readonly 
 const LLM_REQUEST_TRIM_SLACK_BYTES = 3_000_000;
 export function trimPayloadToByteBudget(payload: unknown, maxBytes: number = MAX_LLM_REQUEST_BYTES): unknown {
   const p = payload as Record<string, unknown> | null;
-  let listKey: "messages" | "input" | undefined;
+  let listKey: "messages" | "input" | "contents" | undefined;
   if (Array.isArray(p?.messages)) listKey = "messages";
   else if (Array.isArray(p?.input)) listKey = "input";
+  else if (Array.isArray(p?.contents)) listKey = "contents";
   if (!p || !listKey) return payload;
   const totalBytes = Buffer.byteLength(JSON.stringify(payload));
   if (totalBytes <= maxBytes) return payload;
 
   const inlineImageChars = (b: unknown): number => {
-    const block = b as { type?: string; source?: { type?: string; data?: unknown }; image_url?: unknown };
-    if (block?.type === "image" && block.source?.type === "base64" && typeof block.source.data === "string") {
+    const block = b as {
+      type?: string;
+      source?: { type?: string; data?: unknown };
+      image_url?: unknown;
+      file_data?: string;
+      file?: { file_data?: string };
+      inlineData?: { data?: string };
+    };
+    if (
+      (block?.type === "image" || block?.type === "document") &&
+      block.source?.type === "base64" &&
+      typeof block.source.data === "string"
+    ) {
       return block.source.data.length;
     }
     if (block?.type === "input_image" && typeof block.image_url === "string" && block.image_url.startsWith("data:")) {
       return block.image_url.length;
     }
-    return 0;
+    return block?.file_data?.length ?? block?.file?.file_data?.length ?? block?.inlineData?.data?.length ?? 0;
   };
   const placeholder = (b: unknown) => {
     const block = b as { type?: string; cache_control?: unknown };
     const cache = block.cache_control !== undefined ? { cache_control: block.cache_control } : undefined;
-    return block.type === "input_image"
-      ? { type: "input_text", text: ELIDED_IMAGE_TEXT }
-      : { type: "text", text: ELIDED_IMAGE_TEXT, ...cache };
+    const text =
+      ["document", "input_file", "file"].includes(block.type ?? "") || (b as { inlineData?: unknown })?.inlineData
+        ? "[Document omitted because the model request exceeds its byte budget. Do not claim to have read it.]"
+        : ELIDED_IMAGE_TEXT;
+    if (listKey === "contents") return { text };
+    return block.type === "input_image" || block.type === "input_file"
+      ? { type: "input_text", text }
+      : { type: "text", text, ...cache };
   };
   let toShed = totalBytes - (maxBytes - LLM_REQUEST_TRIM_SLACK_BYTES);
   const trimContent = (content: unknown): unknown => {
@@ -769,10 +787,11 @@ export function trimPayloadToByteBudget(payload: unknown, maxBytes: number = MAX
 
   const items = (p[listKey] as unknown[]).map((m) => {
     if (toShed <= 0) return m;
-    const msg = m as { content?: unknown };
-    if (!Array.isArray(msg?.content)) return m;
-    const content = trimContent(msg.content);
-    return content === msg.content ? m : { ...(m as Record<string, unknown>), content };
+    const msg = m as { content?: unknown; parts?: unknown };
+    const key = listKey === "contents" ? "parts" : "content";
+    if (!Array.isArray(msg?.[key])) return m;
+    const content = trimContent(msg[key]);
+    return content === msg[key] ? m : { ...(m as Record<string, unknown>), [key]: content };
   });
   return { ...p, [listKey]: items };
 }
@@ -781,7 +800,7 @@ function redactImageBytes(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(redactImageBytes);
   if (v && typeof v === "object") {
     const o = v as Record<string, unknown>;
-    if (o.type === "image" && o.source && typeof o.source === "object") {
+    if ((o.type === "image" || o.type === "document") && o.source && typeof o.source === "object") {
       const src = o.source as Record<string, unknown>;
       if (typeof src.data === "string") {
         return {
@@ -797,7 +816,15 @@ function redactImageBytes(v: unknown): unknown {
       return { ...o, data: `<redacted_thinking ${o.data.length} chars omitted>` };
     }
     const out: Record<string, unknown> = {};
-    for (const [k, val] of Object.entries(o)) out[k] = redactImageBytes(val);
+    for (const [k, val] of Object.entries(o)) {
+      out[k] =
+        typeof val === "string" &&
+        (k === "file_data" ||
+          (k === "image_url" && val.startsWith("data:")) ||
+          (k === "data" && typeof o.mimeType === "string"))
+          ? `<file bytes omitted: ${val.length} chars>`
+          : redactImageBytes(val);
+    }
     return out;
   }
   return v;
@@ -1360,7 +1387,13 @@ function estimatePayloadTokens(payload: Record<string, unknown>): number | undef
       const mediaType = (this as { media_type?: unknown } | null)?.media_type;
       const anthropicImage = key === "data" && typeof mediaType === "string" && mediaType.startsWith("image/");
       const openaiImage = (key === "url" || key === "image_url") && value.startsWith("data:image/");
-      return anthropicImage || openaiImage ? IMAGE_STAND_IN : value;
+      const container = this as { media_type?: unknown; mimeType?: unknown; type?: unknown } | null;
+      const nativeDocument =
+        (key === "file_data" && value.startsWith("data:")) ||
+        (key === "data" &&
+          ((container?.type === "base64" && container.media_type === "application/pdf") ||
+            container?.mimeType === "application/pdf"));
+      return anthropicImage || openaiImage || nativeDocument ? IMAGE_STAND_IN : value;
     });
     if (typeof json !== "string") return undefined;
     return Math.ceil(json.length / OUTPUT_GUARD_CHARS_PER_TOKEN);
@@ -1627,14 +1660,20 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
           ref.pendingPrepareNextTurn = undefined;
           ref.pendingTransformContext = undefined;
           applyFastSpeed(payload, ref.fast, (model as { api?: string } | undefined)?.api);
-          const guarded = guardOutputBudget(payload, model);
+          const result = prior ? await prior(payload, model) : payload;
+          const capturedPayload = captureRequests ? sanitizeLlmPayload(result ?? payload, model) : undefined;
+          let finalPayload = await withDocumentInputs(
+            result ?? payload,
+            model as DocumentModel,
+            ref.documents ?? [],
+            ref.abortSignal,
+          );
+          const guarded = guardOutputBudget(finalPayload, model);
           if (guarded.kind === "raised") {
             console.error(
               `[pi] output-budget guard raised output cap ${guarded.from} -> ${guarded.to} (estimated prompt ${guarded.estimatedPromptTokens} tokens) session=${sessionId}`,
             );
           }
-          const result = prior ? await prior(payload, model) : payload;
-          let finalPayload = result ?? payload;
           try {
             finalPayload = trimPayloadToByteBudget(finalPayload);
           } catch (e) {
@@ -1642,7 +1681,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
           }
           if (captureRequests) {
             try {
-              ref.llmCapture?.push(sanitizeLlmPayload(finalPayload, model));
+              ref.llmCapture?.push(capturedPayload!);
             } catch (e) {
               swallow("pi: llm request capture", e);
             }
@@ -1738,6 +1777,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
         try {
           const turnWallClockMs = turn.turnWallClockMs ?? defaultTurnWallClockMs;
           entry.ref.current = turn.tools;
+          entry.ref.documents = turn.documents;
           entry.ref.runtimeHandoff = undefined;
           entry.ref.runtimeMutationPending = false;
           entry.ref.runtimeInFlight = new Set();
@@ -1815,16 +1855,29 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
           let tapeError: Error | undefined;
           let tapedTriggerUser = false;
           const toolAbort = new AbortController();
-          const pendingSteerTapeMeta: Array<{ text: string; ts?: string; entryCreatedAt: number }> = [];
-          const steerTapeStamp = (message: unknown): TapeMeta | undefined => {
+          const pendingSteerTapeMeta: Array<{
+            text: string;
+            bareText?: string;
+            ts?: string;
+            entryCreatedAt: number;
+            images?: HarnessTurnInput["images"];
+            attachments?: HarnessTurnInput["attachments"];
+          }> = [];
+          const steerTapeStamp = (
+            message: unknown,
+          ): { meta: TapeMeta; images?: HarnessTurnInput["images"] } | undefined => {
             const text = textFromContent((message as { content?: unknown }).content);
             const at = pendingSteerTapeMeta.findIndex((p) => p.text === text);
             if (at < 0) return undefined;
             const [steer] = pendingSteerTapeMeta.splice(at, 1);
             return {
-              bareText: steer!.text,
-              ...(steer!.ts ? { ts: steer!.ts } : {}),
-              entryCreatedAt: steer!.entryCreatedAt,
+              images: steer!.images,
+              meta: {
+                bareText: steer!.bareText ?? steer!.text,
+                ...(steer!.ts ? { ts: steer!.ts } : {}),
+                ...(steer!.attachments?.length ? { attachments: steer!.attachments } : {}),
+                entryCreatedAt: steer!.entryCreatedAt,
+              },
             };
           };
           const tapeMessage = async (message: unknown): Promise<void> => {
@@ -1840,7 +1893,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
             const rec: NewTapeRecord = {
               kind: "message",
               harness: "pi",
-              payload: stripImageBytes(message, isTrigger ? turn.images : undefined),
+              payload: stripImageBytes(message, isTrigger ? turn.images : steerStamp?.images),
               scopeLabel: resultScope ?? turn.scopeLabel,
               ...(isTrigger
                 ? {
@@ -1853,7 +1906,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
                     },
                   }
                 : {}),
-              ...(steerStamp ? { meta: steerStamp } : {}),
+              ...(steerStamp ? { meta: steerStamp.meta } : {}),
             };
             try {
               await turn.tape(rec);
@@ -1999,12 +2052,20 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
                 harness: "pi",
                 payload: {
                   role: "user",
-                  content: [{ type: "text", text: steer.text }],
+                  content: [
+                    { type: "text", text: steer.text },
+                    ...(steer.images ?? []).map((image) => ({
+                      type: "image",
+                      mimeType: image.mimeType,
+                      ...(image.artifactId ? { artifactRef: image.artifactId } : { omitted: true }),
+                    })),
+                  ],
                   timestamp: steer.entryCreatedAt,
                 },
                 scopeLabel: turn.scopeLabel,
                 meta: {
-                  bareText: steer.text,
+                  bareText: steer.bareText ?? steer.text,
+                  ...(steer.attachments?.length ? { attachments: steer.attachments } : {}),
                   ...(steer.ts ? { ts: steer.ts } : {}),
                   entryCreatedAt: steer.entryCreatedAt,
                 },
@@ -2054,22 +2115,47 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
                   signals,
                   turn.runId,
                   {
-                    onSteer: async (text, ts) => {
+                    onSteer: async (text, ts, request) => {
+                      const prepared = await turn.prepareSteer?.(text, request);
+                      const prompt = prepared?.text ?? text;
+                      if (!entry.agentSession.isStreaming) return false;
                       if (ts && !steeredSeen.has(ts)) {
                         steeredSeen.add(ts);
                         try {
                           const steered = await turn.emit({
                             type: "user",
-                            payload: { text, ts, steered: true },
+                            payload: {
+                              text,
+                              ts,
+                              steered: true,
+                              ...(prepared?.attachments?.length ? { attachments: prepared.attachments } : {}),
+                            },
                             scopeLabel: turn.scopeLabel,
                           });
-                          pendingSteerTapeMeta.push({ text, ts, entryCreatedAt: steered.createdAt });
+                          pendingSteerTapeMeta.push({
+                            text: prompt,
+                            bareText: text,
+                            ts,
+                            entryCreatedAt: steered.createdAt,
+                            images: prepared?.images,
+                            attachments: prepared?.attachments,
+                          });
                         } catch (e) {
                           swallow("pi: steer persist", e);
                         }
                       }
-                      if (entry.agentSession.isStreaming) entry.ref.silentRequested = false;
-                      await entry.agentSession.steer(text);
+                      if (!entry.agentSession.isStreaming) return false;
+                      if (prepared?.documents?.length)
+                        entry.ref.documents = [...(entry.ref.documents ?? []), ...prepared.documents];
+                      entry.ref.silentRequested = false;
+                      await entry.agentSession.steer(
+                        prompt,
+                        prepared?.images?.map((image) => ({
+                          type: "image" as const,
+                          mimeType: image.mimeType,
+                          data: image.dataBase64,
+                        })),
+                      );
                     },
                     onAbort: async () => {
                       userAborted = true;
@@ -2442,7 +2528,7 @@ export function createPiHarness(opts?: PiHarnessOptions): Harness {
         return oneShot("pi-judge", model, providerKeys, systemPrompt, prompt, {
           modelGateway,
           signal,
-          thinkingLevel: "off",
+          thinkingLevel: "low",
         });
       },
 

@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import { createMemoryRunSignalStore } from "../src/runs/run-signal-store.ts";
@@ -499,3 +500,123 @@ for (const terminal of [{ stop_reason: "max_tokens" }, { is_error: true }]) {
     );
   });
 }
+
+test("steering forwards prepared images and file paths while retaining the original caption in history", async () => {
+  const signals = createMemoryRunSignalStore();
+  const runId = "run-steer-files";
+  const request = {
+    surface: "web",
+    actor: { externalId: "U1" },
+    conversation: { kind: "dm" as const, threadRef: "files" },
+    text: "check this",
+    attachments: [{ name: "photo.png", mimetype: "image/png", sizeBytes: 3, blobId: "b1" }],
+  };
+  let injected: unknown;
+  currentScript = async function* (prompts) {
+    const iterator = prompts[Symbol.asyncIterator]();
+    await iterator.next();
+    await signals.send(runId, { kind: "steer", text: "check this", ts: "files.1", request });
+    injected = (await iterator.next()).value?.message.content;
+    yield resultMessage("saw the image");
+    yield resultMessage("done");
+  };
+  const harness = createClaudeHarness({ signals });
+  const { turn, entries } = harnessTurn({ runId });
+  turn.prepareSteer = async (text, received) => {
+    assert.equal(text, "check this");
+    assert.deepEqual(received, request);
+    return {
+      text: "check this\nThe file is in inbox/steer/photo.png",
+      attachments: [{ name: "photo.png", mimetype: "image/png", sizeBytes: 3, direction: "in", artifactId: "f1" }],
+      images: [{ mimeType: "image/png", dataBase64: "YWJj", artifactId: "f1" }],
+    };
+  };
+  await harness.turns.runTurn(turn);
+  assert.deepEqual(injected, [
+    { type: "text", text: "check this\nThe file is in inbox/steer/photo.png" },
+    { type: "image", source: { type: "base64", media_type: "image/png", data: "YWJj" } },
+  ]);
+  const entry = entries.find((e) => (e.payload as { steered?: boolean }).steered);
+  assert.ok(entry);
+  assert.equal((entry.payload as { text: string }).text, "check this");
+  assert.equal((entry.payload as { attachments: Array<{ artifactId: string }> }).attachments[0]?.artifactId, "f1");
+});
+
+test("Claude sends documents without persisting their contents in the tape", async () => {
+  const pdf = (await readFile(new URL("./fixtures/documents/sample.pdf", import.meta.url))).toString("base64");
+  const secret = "private-document-text";
+  let sent = "";
+  currentScript = async function* (prompts) {
+    for await (const prompt of prompts) {
+      sent = JSON.stringify(prompt);
+      yield resultMessage("Read both");
+      return;
+    }
+  };
+  const tape: unknown[] = [];
+  const { turn } = harnessTurn({
+    documents: [
+      { name: "a.pdf", mimeType: "application/pdf", dataBase64: pdf },
+      { name: "a.txt", mimeType: "text/plain", dataBase64: Buffer.from(secret).toString("base64") },
+    ],
+    tape: async (entry) => {
+      tape.push(entry);
+    },
+  });
+  await createClaudeHarness({}).turns.runTurn(turn);
+  assert.ok(sent.includes(pdf));
+  assert.ok(sent.includes(secret));
+  assert.ok(!JSON.stringify(tape).includes(pdf));
+  assert.ok(!JSON.stringify(tape).includes(secret));
+});
+
+test("Claude includes steered native and fallback documents without capturing their echoed contents", async () => {
+  const signals = createMemoryRunSignalStore();
+  const pdf = (await readFile(new URL("./fixtures/documents/sample.pdf", import.meta.url))).toString("base64");
+  const docx = (await readFile(new URL("./fixtures/documents/sample.docx", import.meta.url))).toString("base64");
+  const tape: unknown[] = [];
+  let sent = "";
+  currentScript = async function* (prompts) {
+    const iterator = prompts[Symbol.asyncIterator]();
+    const initial = (await iterator.next()).value;
+    yield initial!;
+    await signals.send("steer-documents", { kind: "steer", text: "read the documents", ts: "files.2" });
+    const steered = (await iterator.next()).value!;
+    sent = JSON.stringify(steered);
+    yield steered;
+    yield resultMessage("read both");
+    yield resultMessage("done");
+  };
+  const { turn } = harnessTurn({
+    runId: "steer-documents",
+    tape: async (row) => {
+      tape.push(row);
+    },
+  });
+  turn.documents = [
+    { name: "initial.txt", mimeType: "text/plain", dataBase64: Buffer.from("A".repeat(80_000)).toString("base64") },
+  ];
+  turn.prepareSteer = async (text) => ({
+    text,
+    documents: [
+      { name: "steered.pdf", mimeType: "application/pdf", dataBase64: pdf },
+      {
+        name: "steered.docx",
+        mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        dataBase64: docx,
+      },
+      {
+        name: "overflow.txt",
+        mimeType: "text/plain",
+        dataBase64: Buffer.from("Z".repeat(30_000) + "OUTSIDE-BUDGET-492").toString("base64"),
+      },
+    ],
+  });
+  await createClaudeHarness({ signals }).turns.runTurn(turn);
+  assert.ok(sent.includes(pdf));
+  assert.ok(!sent.includes("OUTSIDE-BUDGET-492"));
+  assert.match(sent, /truncated to fit/);
+  assert.ok(sent.includes("DOCX-QUARTZ-731"));
+  assert.ok(!JSON.stringify(tape).includes(pdf));
+  assert.ok(!JSON.stringify(tape).includes("DOCX-QUARTZ-731"));
+});

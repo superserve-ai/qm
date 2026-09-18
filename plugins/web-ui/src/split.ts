@@ -31,6 +31,7 @@ import {
   type IDockviewPanel,
   type IGroupHeaderProps,
   type IHeaderActionsRenderer,
+  type DockviewIDisposable,
   type ITabRenderer,
   type SerializedDockview,
   type TabPartInitParameters,
@@ -190,7 +191,7 @@ function buildDock(): DockviewApi {
   toastEl.className = "split-toast-layer";
   host.appendChild(toastEl);
   const api = createDockview(dockEl, {
-    theme: { name: "qm", className: "dockview-theme-qm", gap: 10 },
+    theme: { name: "qm", className: "dockview-theme-qm", gap: 1 },
     createComponent: () => new PaneContent(),
     createTabComponent: () => new PaneTab(),
     createRightHeaderActionComponent: () => new GroupActions(),
@@ -872,8 +873,8 @@ function paneCrumb(panel: IDockviewPanel): string | null {
 
 const PANE_TOOLS: { tool: SessionTool; glyph: Parameters<typeof icon>[0]; label: string }[] = [
   { tool: "crons", glyph: Clock3, label: "Crons" },
-  { tool: "files", glyph: Files, label: "Files" },
   { tool: "apps", glyph: Rocket, label: "Apps" },
+  { tool: "files", glyph: Files, label: "Files" },
   { tool: "skills", glyph: Box, label: "Skills" },
   { tool: "memory", glyph: Brain, label: "Memory" },
   { tool: "keychain", glyph: KeyRound, label: "Your keychain" },
@@ -1284,6 +1285,7 @@ class StripDrop implements IHeaderActionsRenderer {
 
 class GroupActions implements IHeaderActionsRenderer {
   readonly element: HTMLElement;
+  private activePanelChange: DockviewIDisposable | null = null;
   private props: IGroupHeaderProps | null = null;
   private menuOpen = false;
 
@@ -1295,6 +1297,7 @@ class GroupActions implements IHeaderActionsRenderer {
   init(props: IGroupHeaderProps): void {
     this.props = props;
     groupActions.add(this);
+    this.activePanelChange = props.group.api.onDidActivePanelChange(() => this.draw());
     document.addEventListener("click", this.onDocClick);
     this.draw();
   }
@@ -1459,6 +1462,7 @@ class GroupActions implements IHeaderActionsRenderer {
   dispose(): void {
     document.removeEventListener("click", this.onDocClick);
     groupActions.delete(this);
+    this.activePanelChange?.dispose();
     this.props = null;
   }
 }

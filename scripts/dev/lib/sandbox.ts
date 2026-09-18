@@ -1,5 +1,6 @@
 import { existsSync, openSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { writePidFile } from "./lease.ts";
 import { run } from "./proc.ts";
@@ -152,8 +153,8 @@ export async function resolveSandbox(opts: {
   }
 
   if (backend === "superserve") {
-    const apiKey = opts.baseEnv.SUPERSERVE_API_KEY;
-    const template = opts.baseEnv.SUPERSERVE_TEMPLATE;
+    const apiKey = opts.baseEnv.SUPERSERVE_API_KEY?.trim();
+    const template = opts.baseEnv.SUPERSERVE_TEMPLATE?.trim();
     if (!apiKey)
       throw new Error(
         "--sandbox superserve requires SUPERSERVE_API_KEY in the environment (create an API key in the Superserve console)",
@@ -174,7 +175,9 @@ export async function resolveSandbox(opts: {
       SANDBOX_BACKEND: "superserve",
       SUPERSERVE_API_KEY: apiKey,
       SUPERSERVE_TEMPLATE: template,
-      SUPERSERVE_NAME_PREFIX: opts.baseEnv.SUPERSERVE_NAME_PREFIX || "qmdev",
+      SUPERSERVE_NAME_PREFIX:
+        opts.baseEnv.SUPERSERVE_NAME_PREFIX ||
+        `qmdev-${createHash("sha1").update(opts.worktree).digest("hex").slice(0, 12)}`,
     };
     if (opts.baseEnv.SUPERSERVE_BASE_URL) env.SUPERSERVE_BASE_URL = opts.baseEnv.SUPERSERVE_BASE_URL;
     if (opts.baseEnv.SUPERSERVE_EGRESS_ALLOW) env.SUPERSERVE_EGRESS_ALLOW = opts.baseEnv.SUPERSERVE_EGRESS_ALLOW;

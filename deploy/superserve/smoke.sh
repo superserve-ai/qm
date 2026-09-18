@@ -67,7 +67,18 @@ for _ in {1..120}; do
     docker exec "$container" node -e "fetch('http://127.0.0.1:8082/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
     docker exec "$container" node -e "fetch('http://127.0.0.1:8082/admin/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
     docker exec "$container" node -e "fetch('http://127.0.0.1:8099/.well-known/jwks.json').then(async r=>{const j=await r.json();process.exit(r.ok&&j.keys?.length===1?0:1)}).catch(()=>process.exit(1))"
-    echo "ok: tenant image serves portal on the container port with core, web-ui, the admin module and the embedded broker healthy on loopback"
+    docker exec "$container" node --input-type=module -e '
+      import assert from "node:assert/strict";
+      const url = "http://127.0.0.1:8080/v1/admin/whoami";
+      const anonymous = await fetch(url);
+      assert.equal(anonymous.status, 404);
+      const invalid = await fetch(url, { headers: { "x-agent-capability": "invalid-smoke-token" } });
+      assert.equal(invalid.status, 401);
+      assert.equal((await invalid.json()).message, "invalid or expired capability token");
+    '
+    docker stop --time 20 "$container" > /dev/null
+    [[ "$(docker inspect -f '{{.State.ExitCode}}' "$container")" == 0 ]]
+    echo "ok: tenant services are healthy, agent API requests reach core authentication, and shutdown exits cleanly"
     exit 0
   fi
   [[ "$(docker inspect -f '{{.State.Running}}' "$container")" == true ]] || break

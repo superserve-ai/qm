@@ -627,6 +627,12 @@ const csvList = (value: string | undefined): string[] | undefined => {
 function superserveSandboxEnv(env: NodeJS.ProcessEnv): SuperserveSandboxEnv {
   const egressAllow = csvList(env.SUPERSERVE_EGRESS_ALLOW);
   const egressDeny = csvList(env.SUPERSERVE_EGRESS_DENY);
+  const configGeneration = numEnvStrict("SUPERSERVE_CONFIG_GENERATION", env.SUPERSERVE_CONFIG_GENERATION);
+  if (configGeneration !== undefined && (!Number.isSafeInteger(configGeneration) || configGeneration < 0)) {
+    throw new Error(
+      `SUPERSERVE_CONFIG_GENERATION=${JSON.stringify(env.SUPERSERVE_CONFIG_GENERATION)} must be a nonnegative safe integer, or unset it.`,
+    );
+  }
   return {
     ...(env.SUPERSERVE_API_KEY ? { apiKey: env.SUPERSERVE_API_KEY } : {}),
     ...(env.SUPERSERVE_BASE_URL?.trim() ? { baseUrl: env.SUPERSERVE_BASE_URL.trim() } : {}),
@@ -644,9 +650,7 @@ function superserveSandboxEnv(env: NodeJS.ProcessEnv): SuperserveSandboxEnv {
     ...(numEnvStrict("SANDBOX_TIMEOUT_SEC", env.SANDBOX_TIMEOUT_SEC) !== undefined
       ? { defaultTimeoutSec: numEnvStrict("SANDBOX_TIMEOUT_SEC", env.SANDBOX_TIMEOUT_SEC) }
       : {}),
-    ...(numEnvStrict("SUPERSERVE_CONFIG_GENERATION", env.SUPERSERVE_CONFIG_GENERATION) !== undefined
-      ? { configGeneration: numEnvStrict("SUPERSERVE_CONFIG_GENERATION", env.SUPERSERVE_CONFIG_GENERATION) }
-      : {}),
+    ...(configGeneration !== undefined ? { configGeneration } : {}),
   };
 }
 

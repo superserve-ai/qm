@@ -297,6 +297,7 @@ test("production refuses missing, placeholder, or weak signing keys", () => {
 
 test("defaults come from CONFIG_DEFAULTS, set exactly once", () => {
   const def = loadConfig({});
+  assert.equal(CONFIG_DEFAULTS.workers, 16);
   assert.equal(def.workers, CONFIG_DEFAULTS.workers);
   assert.equal(def.rateLimitPerWindow, CONFIG_DEFAULTS.rateLimitPerWindow);
   assert.equal(def.rateLimitWindowMs, CONFIG_DEFAULTS.rateLimitWindowMs);
@@ -386,6 +387,18 @@ test("HARNESS=codex requires OPENAI_API_KEY: its CLI cannot do browser OAuth in 
 test("HARNESS=claude uses native Claude authentication and does not require an Anthropic key", () => {
   assert.doesNotThrow(() => loadConfig({ HARNESS: "claude" }));
   assert.equal(loadConfig({ HARNESS: "claude", CLAUDE_MODEL: "claude-opus-4-8" }).claudeModel, "claude-opus-4-8");
+});
+
+test("SUPERSERVE_CONFIG_GENERATION accepts only nonnegative safe integers", () => {
+  for (const value of ["9007199254740993", "-1", "0.5", "NaN", "Infinity"]) {
+    assert.throws(() => loadConfig({ SUPERSERVE_CONFIG_GENERATION: value }), /SUPERSERVE_CONFIG_GENERATION/, value);
+  }
+  for (const value of [undefined, "", "  "]) {
+    assert.equal(loadConfig({ SUPERSERVE_CONFIG_GENERATION: value }).superserveSandbox.configGeneration, undefined);
+  }
+  for (const value of ["0", "7", " 42 ", String(Number.MAX_SAFE_INTEGER)]) {
+    assert.equal(loadConfig({ SUPERSERVE_CONFIG_GENERATION: value }).superserveSandbox.configGeneration, Number(value));
+  }
 });
 
 test("SANDBOX_BACKEND: unset defaults to local (dev only); the retired secondary variable is tolerated", () => {

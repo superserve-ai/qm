@@ -76,7 +76,7 @@ for _ in {1..120}; do
       assert.equal(invalid.status, 401);
       assert.equal((await invalid.json()).message, "invalid or expired capability token");
     '
-    docker stop --time 20 "$container" > /dev/null
+    docker stop --time 10 "$container" > /dev/null
     [[ "$(docker inspect -f '{{.State.ExitCode}}' "$container")" == 0 ]]
     echo "ok: tenant services are healthy, agent API requests reach core authentication, and shutdown exits cleanly"
     exit 0

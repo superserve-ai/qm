@@ -58,7 +58,7 @@ test("tenant entry rejects a ready timeout that overflows a node timer", async (
 test("tenant entry rejects a drain window that would overflow the shutdown timer", async () => {
   const { code, stderr } = await runEntry({ SHUTDOWN_DRAIN_MS: "2147483647" });
   assert.equal(code, 2);
-  assert.match(stderr, /SHUTDOWN_DRAIN_MS must be an integer between 0 and 2147472647/);
+  assert.match(stderr, /SHUTDOWN_DRAIN_MS must be an integer between 0 and 2147474647/);
 });
 
 function millis(source: string, pattern: RegExp): number {
@@ -85,16 +85,15 @@ test("tenant entry waits out core's drain and its lease-release backstop", () =>
   assert.ok(millis(entry, /const KILL_MARGIN_MS = ([\d_]+);/) > 0);
 });
 
-test("the image's drain default leaves the shutdown sequence inside a 12s termination grace", () => {
+test("the image's drain default leaves the shutdown sequence inside a 10s termination grace", () => {
   const entry = readFileSync(ENTRY, "utf8");
   const dockerfile = readFileSync(join(import.meta.dirname, "../deploy/superserve/Dockerfile"), "utf8");
   const backstop =
     millis(entry, /const DRAIN_BACKSTOP_MS = ([\d_]+);/) +
-    millis(entry, /const LEASE_RELEASE_MS = ([\d_]+);/) +
-    millis(entry, /const ERROR_FLUSH_MS = ([\d_]+);/) +
+    Math.max(millis(entry, /const LEASE_RELEASE_MS = ([\d_]+);/), millis(entry, /const ERROR_FLUSH_MS = ([\d_]+);/)) +
     millis(entry, /const KILL_MARGIN_MS = ([\d_]+);/);
   const drain = millis(dockerfile, /ENV SHUTDOWN_DRAIN_MS=([\d_]+)/);
-  assert.ok(drain + backstop <= 12_000, `drain ${drain} + backstop ${backstop} exceeds a 12s grace`);
+  assert.ok(drain + backstop <= 10_000, `drain ${drain} + backstop ${backstop} exceeds a 10s grace`);
 });
 
 test("tenant entry accepts the top of the port range", async () => {

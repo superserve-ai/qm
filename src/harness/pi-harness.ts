@@ -68,7 +68,7 @@ import { customModelsJson, customProvidersVersion } from "../model/custom-provid
 import { modelGatewayRequest, type ModelGatewayTransportConfig } from "../model/provider-endpoints.ts";
 import {
   defineHarness,
-  envelopeWithoutMessages,
+  promptEnvelopeWithoutHistory,
   type Harness,
   type HarnessCompactInput,
   type HarnessDetectInput,
@@ -394,9 +394,10 @@ const APPROVAL_SUMMARY_PROMPT = [
 
 const MAX_TITLE_CHARS = 60;
 
-export function sanitizeTitle(out = ""): string {
+export function sanitizeTitle(out = ""): string | undefined {
   let t = (out.trim().split("\n")[0] ?? "").trim();
   if (!t) throw new TitleRejected("empty", out);
+  if (/^none$/i.test(out.trim())) return undefined;
   if (/^none$/i.test(t)) throw new TitleRejected("none", out);
   t = t.replace(/^(?:title|chat title)\s*[:-]\s*/i, "");
   t = t.replace(/^["'“”‘’`]+|["'“”‘’`]+$/g, "").trim();
@@ -853,7 +854,7 @@ export function sanitizeLlmPayload(
   const withTransport = (r: { envelope: unknown; truncated: boolean }) => (transport ? { ...r, transport } : r);
   let redacted: unknown;
   try {
-    redacted = redactImageBytes(envelopeWithoutMessages(payload));
+    redacted = redactImageBytes(promptEnvelopeWithoutHistory(payload));
   } catch {
     return withTransport({ envelope: { note: "payload not capturable" }, truncated: true });
   }

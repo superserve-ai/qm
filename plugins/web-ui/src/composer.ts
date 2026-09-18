@@ -61,7 +61,7 @@ import {
 import { modelSupportsFastMode } from "./pi-models";
 import type { ComposerSurface, ConvCtx } from "./conv-types";
 import { bumpSessionActivity, dropPendingSession, renderList } from "./sessions";
-import { appState, switchView } from "./shell";
+import { appState } from "./shell";
 import { base64ToText, bytesToBase64, insertIntoDraft, pasteChipLabel } from "./paste-text";
 import { clearDraft, newChatDraftKey, saveDraft } from "./drafts";
 import { tip } from "./tooltip";
@@ -636,9 +636,6 @@ export function createComposerSurface(ctx: ConvCtx): ComposerSurface {
               ${icon(Paperclip, 18)}
             </button>
             ${showRuntimeControls ? runtimeControls : nothing}
-            <button type="button" class="btn" @click=${() => switchView("settings")}>
-              ${appState.me?.individualModelAuth ? "My account" : "Company access"}
-            </button>
           </div>
           <div class="composer-right">${sendControls(agent)}</div>
         </div>

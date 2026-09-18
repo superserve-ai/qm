@@ -1,3 +1,10 @@
+import {
+  MAX_DOCUMENT_BYTES,
+  documentText,
+  historicalDocumentMetas,
+  isTextDocument,
+  loadDocumentInputs,
+} from "./document-inputs.ts";
 import { recoveredRuntime } from "../harness/runtime-recovery.ts";
 import { createCanWriteScope } from "../resolution/scope-membership.ts";
 import { evaluateCommandWithLayer } from "../policy/command-policy.ts";
@@ -312,12 +319,15 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       ]);
       return summary?.trim() || undefined;
     } catch (e) {
-      deps.errors?.record({
-        category: "command_policy",
-        code: "summary_failed",
-        message: errMessage(e),
-        scopeLabel: scopeId,
-      });
+      deps.errors?.record(
+        {
+          category: "command_policy",
+          code: "summary_failed",
+          message: errMessage(e),
+          scopeLabel: scopeId,
+        },
+        e,
+      );
       return undefined;
     }
   }
@@ -342,13 +352,16 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     try {
       title = await deps.harness.models.generateTitle?.(transcript);
     } catch (e) {
-      deps.errors?.record({
-        category: "session_title",
-        code: e instanceof TitleRejected ? `rejected_${e.rule}` : "generation_failed",
-        message: errMessage(e),
-        scopeLabel: scopeId,
-        sessionId,
-      });
+      deps.errors?.record(
+        {
+          category: "session_title",
+          code: e instanceof TitleRejected ? `rejected_${e.rule}` : "generation_failed",
+          message: errMessage(e),
+          scopeLabel: scopeId,
+          sessionId,
+        },
+        e,
+      );
     }
     title ??= fallbackText ? fallbackSessionTitle(fallbackText) : undefined;
     if (title) {
@@ -523,7 +536,11 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
     },
 
     async handleTurn(input: OrchestratorInput): Promise<TurnResult> {
-      if (input.swarm && !deps.swarms) throw new Error("swarm service unavailable");
+      if (
+        !deps.swarms &&
+        (input.swarm || input.surface === "swarm" || input.conversation.threadRef.startsWith("swarm:"))
+      )
+        throw new NonRetryableTurnError("swarm service unavailable");
       const swarmBinding = await deps.swarms?.binding(input);
       const swarmEntryProvenance = input.swarm ? { origin: "automation", swarm: input.swarm } : {};
       await deps.refreshModels?.();
@@ -1926,7 +1943,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             (orgMemoryWrite
               ? ', and for plain "remember this org-wide" requests the lighter path is `"scope":"org"` on the memory self-API (memory skill)'
               : "") +
-            ". You're acting as them: confirm before any mutation, and say exactly what you changed. Hard limits the API enforces: private-content reads work only from a DM; admin grant changes are portal-only.";
+            ". You're acting as them: confirm before any mutation, and say exactly what you changed. Hard limits the API enforces: private-content reads require a DM or an Open conversation on a live admin turn (organization, personal, and conversation sharing restrictions all apply); admin grant changes and impersonation are portal-only. Open admin reads can expose private data to everyone in the conversation: retrieve and report only what the request needs.";
         }
         if (deps.signingSecret && deps.apiBaseUrl && (deps.crons || deps.webhooks || deps.monitors)) {
           const nowMs = Date.now();
@@ -2209,13 +2226,16 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
               }
             : {}),
           onError: (e) =>
-            deps.errors?.record({
-              category: "file_store",
-              code: "register_failed",
-              message: errMessage(e),
-              scopeLabel: scopeId,
-              sessionId: session.id,
-            }),
+            deps.errors?.record(
+              {
+                category: "file_store",
+                code: "register_failed",
+                message: errMessage(e),
+                scopeLabel: scopeId,
+                sessionId: session.id,
+              },
+              e,
+            ),
         };
         const postProvenance = (deliveryKey: string): DeliveryProvenance =>
           turnDeliveryProvenance({
@@ -2640,25 +2660,25 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           await deps.harness.turns.resetSession?.(session.id);
         }
         const visibleHistory = filterHistory(forModelContext(rawEntries, { includeSecurityTainted: false }));
-        const rehydrateTape = (messages: readonly unknown[]) => {
-          let readableHandles: Awaited<ReturnType<typeof deps.acl.handlesForAudience>> | undefined;
-          const mayReadArtifact = async (artifact: FileArtifact): Promise<boolean> => {
-            if (
-              conversation.audience.every((principal) =>
-                principalEntitledToScope(principal, artifact.ownerScopeId, scopeId, resolution.orgScopeId),
-              )
+        let readableHandles: Awaited<ReturnType<typeof deps.acl.handlesForAudience>> | undefined;
+        const mayReadArtifact = async (artifact: FileArtifact): Promise<boolean> => {
+          if (
+            conversation.audience.every((principal) =>
+              principalEntitledToScope(principal, artifact.ownerScopeId, scopeId, resolution.orgScopeId),
             )
-              return true;
-            readableHandles ??= await deps.acl.handlesForAudience(
-              conversation.audience,
-              scopeId,
-              resolution.orgScopeId,
-              principalEntitledToScope,
-            );
-            return readableHandles.some(
-              (handle) => handle.ownerScopeId === artifact.ownerScopeId && handle.ownerPath === artifact.path,
-            );
-          };
+          )
+            return true;
+          readableHandles ??= await deps.acl.handlesForAudience(
+            conversation.audience,
+            scopeId,
+            resolution.orgScopeId,
+            principalEntitledToScope,
+          );
+          return readableHandles.some(
+            (handle) => handle.ownerScopeId === artifact.ownerScopeId && handle.ownerPath === artifact.path,
+          );
+        };
+        const rehydrateTape = (messages: readonly unknown[]) => {
           return rehydrateFoldImages(
             messages,
             async (artifactRef, remainingBytes) => {
@@ -2672,6 +2692,81 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             MAX_HISTORY_IMAGE_BYTES,
           );
         };
+        const documentInputs = strictReadOnly
+          ? { documents: [], notices: [] }
+          : await loadDocumentInputs(
+              deps.files,
+              [
+                ...historicalDocumentMetas(
+                  filterHistory(
+                    forSearchView(
+                      contextWindow.totalEntries > rawEntries.length
+                        ? await deps.sessions.getEntries(session.id)
+                        : rawEntries,
+                    ),
+                  ),
+                ),
+                ...inbound.metas,
+              ],
+              mayReadArtifact,
+              undefined,
+              turnAbort.signal,
+            );
+        const screenDocuments = async (
+          documentInputs: Awaited<ReturnType<typeof loadDocumentInputs>>,
+          requestText: string,
+        ): Promise<boolean> => {
+          let documentsUnscreened = false;
+          if (securityPolicy.inboundScreening === "external") {
+            for (const document of documentInputs.documents.slice()) {
+              documentsUnscreened ||= !isTextDocument(document);
+              if (!(deps.securityScreener || deps.harness.models.screenSecurity)) {
+                documentsUnscreened = true;
+                continue;
+              }
+              let content: string;
+              try {
+                content = await documentText(document, turnAbort.signal);
+              } catch {
+                turnAbort.signal.throwIfAborted();
+                documentsUnscreened = true;
+                continue;
+              }
+              const verdicts: Array<SecurityScreenVerdict | undefined> = [];
+              for (const chunk of securityScreenChunks("tool_result:inbound_document", content)) {
+                turnAbort.signal.throwIfAborted();
+                const verdict = await classifySecurityData(chunk, actor.id, scopeId, undefined, {
+                  hook: "tool_response",
+                  request: requestText,
+                  surface: "inbound_file",
+                  origin: input.origin.kind,
+                });
+                verdicts.push(verdict);
+                if (verdict?.decision === "strict") break;
+              }
+              const verdict =
+                verdicts.find((value) => value?.decision === "strict") ??
+                verdicts.find((value) => value?.unscreened) ??
+                verdicts[0];
+              if (verdict?.decision === "strict") {
+                documentInputs.documents.splice(documentInputs.documents.indexOf(document), 1);
+                documentInputs.notices.push(
+                  `${document.name}: document withheld by the external-data security screen.`,
+                );
+              } else if (
+                !verdicts.every((value) => value?.decision === "auto" && !value.unscreened) ||
+                content.includes("[Document text truncated")
+              )
+                documentsUnscreened = true;
+            }
+          }
+          return documentsUnscreened;
+        };
+        const documentsUnscreened = await screenDocuments(documentInputs, input.text);
+        let remainingDocumentBytes =
+          MAX_DOCUMENT_BYTES -
+          documentInputs.documents.reduce((sum, document) => sum + Buffer.byteLength(document.dataBase64, "base64"), 0);
+        let remainingDocumentCount = 10 - documentInputs.documents.length;
         const tapeRows = await (async () => {
           if (historyHasSecurityTaint || contextWindow.totalEntries > TAPE_IMPORT_MAX_ENTRIES) return undefined;
           try {
@@ -2730,7 +2825,10 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
         })();
         const principalDelivered = await recentPrincipalDeliveryNote(deps.deliveries, session.threadRef);
         const sender = !automatedTurn && input.text.trim() ? senderNote(actor.displayName) : "";
-        const unscreenedNote = inputUnscreened || inbound.unscreened.length ? unscreenedNotice("inbound content") : "";
+        const unscreenedNote =
+          inputUnscreened || inbound.unscreened.length || documentsUnscreened
+            ? unscreenedNotice("inbound content")
+            : "";
         const turnEnvironment = environmentNote(
           [manifest, principalDelivered, sender, unscreenedNote, input.conversationHeader?.trim(), volatileContext]
             .filter((s) => s && s.trim())
@@ -2848,18 +2946,19 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           let claudeOauthToken: string | undefined;
           let codexTurnAuth: CodexTurnAuth | undefined;
           const userCredStore = deps.userModelCredentials;
-          if (userCredStore && humanTurn && (await deps.config?.getIndividualModelAuthDurable())) {
+          const account = input.modelAccount ?? (await deps.config?.getModelAccountDurable(actor.id)) ?? "company";
+          if (userCredStore && humanTurn && account !== "company") {
             const [anthCred, oaiCred] = await Promise.all([
-              userCredStore.get(actor.id, "anthropic"),
-              userCredStore.get(actor.id, "openai"),
+              account === "openai" ? null : userCredStore.get(actor.id, "anthropic"),
+              account === "anthropic" ? null : userCredStore.get(actor.id, "openai"),
             ]);
             const orgRuntime = await deps.config?.getRuntimeSelectionDurable(resolution.orgScopeId);
             const preferredHarness = runtime.harnessId ?? input.harness ?? orgRuntime?.harnessId ?? deps.defaultHarness;
             const routing = resolveIndividualAuthRouting(
               anthCred ?? null,
               oaiCred ?? null,
-              runtime.modelId ?? input.model,
-              preferredHarness,
+              account === "personal" ? (runtime.modelId ?? input.model) : runtime.modelId,
+              account === "personal" ? preferredHarness : runtime.harnessId,
             );
             if (routing?.kind === "apikey") {
               userHarnessOverride = "pi";
@@ -2899,7 +2998,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             }
             if (!userHarnessOverride) {
               throw new NonRetryableTurnError(
-                "This organization has each person chat on their own AI account, and yours isn't connected yet. Open the web app and connect Claude or ChatGPT from the AI account panel, then try again.",
+                "Your personal AI account is unavailable. Open Settings → AI access to reconnect Claude or ChatGPT / Codex, or choose company access. The chat cannot continue on company access.",
               );
             }
           }
@@ -3041,6 +3140,75 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           };
           return deps.harness.turns.runTurn({
             session,
+            prepareSteer: async (text, request) => {
+              if (!request?.attachments?.length) return { text };
+              const seed = `${fileRegistration.seed}:steer:${randomUUID()}`;
+              const inboxDir = `${turnInboxDir}/${randomUUID()}`;
+              const received = strictReadOnly
+                ? { metas: [], images: [], tooMany: [], unavailable: [], blocked: [], unscreened: [] }
+                : await materializeInbound(
+                    deps.sandbox,
+                    await provision(),
+                    request.attachments,
+                    blobTransfer,
+                    { ...fileRegistration, seed },
+                    inboxDir,
+                    securityPolicy.inboundScreening === "external"
+                      ? ({ content, name, mimetype }) =>
+                          classifySecurityData(
+                            JSON.stringify({ name, mimetype, content }),
+                            actor.id,
+                            scopeId,
+                            undefined,
+                            {
+                              hook: "tool_response",
+                              surface: "inbound_file",
+                              origin: input.origin.kind,
+                            },
+                          )
+                      : undefined,
+                  );
+              const steeredDocuments = await loadDocumentInputs(
+                deps.files,
+                received.metas,
+                mayReadArtifact,
+                remainingDocumentBytes,
+                turnAbort.signal,
+                remainingDocumentCount,
+              );
+              const steeredUnscreened = await screenDocuments(steeredDocuments, text);
+              remainingDocumentBytes -= steeredDocuments.documents.reduce(
+                (sum, document) => sum + Buffer.byteLength(document.dataBase64, "base64"),
+                0,
+              );
+              remainingDocumentCount -= steeredDocuments.documents.length;
+              documentInputs.documents.push(...steeredDocuments.documents);
+              const issues = inboundIssueList({
+                ...received,
+                surfaceNotes: strictReadOnly
+                  ? request.attachments.map((a) => `${safeAttachmentName(a.name)} — unavailable in read-only mode`)
+                  : [],
+              });
+              return {
+                text: [
+                  text,
+                  inboundManifest(received.metas, inboxDir),
+                  ...steeredDocuments.notices,
+                  issues.length ? fileEventPayload("in", issues).text : "",
+                  securityPolicy.inboundScreening === "external" &&
+                  (steeredUnscreened ||
+                    received.unscreened.length ||
+                    received.metas.some((a) => !isScreenableTextAttachment(a.mimetype)))
+                    ? unscreenedNotice("inbound content")
+                    : "",
+                ]
+                  .filter(Boolean)
+                  .join("\n\n"),
+                attachments: received.metas,
+                images: received.images,
+                documents: steeredDocuments.documents,
+              };
+            },
             ...(userProviderKeys ? { providerKeys: userProviderKeys } : {}),
             ...(claudeOauthToken ? { claudeOauthToken } : {}),
             ...(userHarnessOverride && !restoredRuntime && runtimeHandoffs === 0 ? { runtimePinned: true } : {}),
@@ -3060,11 +3228,14 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
             input: harnessInput,
             ...(!partial && messageTs ? { triggerTs: messageTs } : {}),
             ...(!partial && entryTs ? { entryTs } : {}),
-            ...(turnEnvironment ? { environment: turnEnvironment } : {}),
+            ...([turnEnvironment, ...documentInputs.notices].filter(Boolean).length
+              ? { environment: [turnEnvironment, ...documentInputs.notices].filter(Boolean).join("\n") }
+              : {}),
             ...(extras.priorTurns?.length ? { priorTurns: extras.priorTurns } : {}),
             ...(extras.overheard?.length ? { overheard: extras.overheard } : {}),
             ...(extras.attachments?.length ? { attachments: extras.attachments } : {}),
             ...(extras.images?.length ? { images: extras.images } : {}),
+            documents: [...documentInputs.documents],
             ...(Object.keys(requestedRuntime).length ? { runtime: requestedRuntime } : {}),
             ...(strictReadOnly ? { readOnly: true } : {}),
             surfaceName,
@@ -3558,13 +3729,16 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                 idempotencyKey: input.runId ?? `${session.id}:${spine.turnUserEntrySeq ?? "turn"}`,
               });
             } catch (e) {
-              deps.errors?.record({
-                category: "memory",
-                code: "capture_failed",
-                message: errMessage(e),
-                scopeLabel: scopeId,
-                sessionId: session.id,
-              });
+              deps.errors?.record(
+                {
+                  category: "memory",
+                  code: "capture_failed",
+                  message: errMessage(e),
+                  scopeLabel: scopeId,
+                  sessionId: session.id,
+                },
+                e,
+              );
             } finally {
               deps.metrics?.record({
                 totalMs: 0,
@@ -3606,13 +3780,16 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                       }),
                   });
                 } catch (e) {
-                  deps.errors?.record({
-                    category: "keychain",
-                    code: "device_flow_capture_failed",
-                    message: errMessage(e),
-                    scopeLabel: scopeId,
-                    sessionId: session.id,
-                  });
+                  deps.errors?.record(
+                    {
+                      category: "keychain",
+                      code: "device_flow_capture_failed",
+                      message: errMessage(e),
+                      scopeLabel: scopeId,
+                      sessionId: session.id,
+                    },
+                    e,
+                  );
                 }
               }
             }
@@ -3796,13 +3973,16 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           });
           return { status: "refused", sessionId: session.id, reason: err.message };
         }
-        deps.errors?.record({
-          category: "turn",
-          code: "error",
-          message: errMessage(err),
-          scopeLabel: scopeId,
-          sessionId: session.id,
-        });
+        deps.errors?.record(
+          {
+            category: "turn",
+            code: "error",
+            message: errMessage(err),
+            scopeLabel: scopeId,
+            sessionId: session.id,
+          },
+          err,
+        );
         markErrorRecorded(err);
         if ((err instanceof NonRetryableTurnError || input.finalAttempt) && !input.cancel?.aborted) {
           const mirrorFailureEntry = async (entry: SessionEntry | undefined): Promise<void> => {

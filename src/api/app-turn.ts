@@ -25,7 +25,6 @@ import { resolveRuntimeChoiceDurable } from "../harness/harness-router.ts";
 import { swallow, swallowAs } from "../util/errors.ts";
 import { sleep } from "../util/async.ts";
 import { GENERIC_FAILURE_CLAUSE } from "../../plugins/chassis/src/failure-copy.ts";
-import { conversationFollowup } from "../wake/conversation-status.ts";
 
 import type { App, AppDeps } from "./app-types.ts";
 import { STALE_LEASE_GRACE_MS } from "./app-types.ts";
@@ -164,7 +163,20 @@ export function createTurnMethods(
         return (await deps.projects.withVersion(conversationRef, projectVersion, fn)) ?? null;
       }
 
-      const individualAuth = !!deps.userModelCredentials && (await deps.config.getIndividualModelAuthDurable());
+      const approvedRequest = req.approval ? (await deps.approvals?.get(req.approval.requestId))?.request : undefined;
+      const sameApprovedMessage =
+        approvedRequest?.text === req.text &&
+        approvedRequest.actor.externalId === req.actor.externalId &&
+        approvedRequest.conversation.threadRef === req.conversation.threadRef;
+      let privateRequest = req.privateSessionMessage ? req : undefined;
+      if (approvedRequest?.privateSessionMessage) privateRequest = approvedRequest;
+      const origin = resolveTurnOrigin(privateRequest ?? req);
+
+      const modelAccount =
+        deps.userModelCredentials && origin.kind === "human"
+          ? await deps.config.getModelAccountDurable(actor.id)
+          : "company";
+      const individualAuth = modelAccount !== "company";
       if (req.surface === "web") {
         const threadRef = req.conversation.threadRef;
         const existing = await deps.sessions.getByThread(threadRef);
@@ -269,15 +281,6 @@ export function createTurnMethods(
         ...(publishMembers ? { publishMembers } : {}),
       };
 
-      const approvedRequest = req.approval ? (await deps.approvals?.get(req.approval.requestId))?.request : undefined;
-      const sameApprovedMessage =
-        approvedRequest?.text === req.text &&
-        approvedRequest.actor.externalId === req.actor.externalId &&
-        approvedRequest.conversation.threadRef === req.conversation.threadRef;
-      let privateRequest = req.privateSessionMessage ? req : undefined;
-      if (approvedRequest?.privateSessionMessage) privateRequest = approvedRequest;
-      const origin = resolveTurnOrigin(privateRequest ?? req);
-
       const input = {
         surface: req.surface,
         ...(sameApprovedMessage && approvedRequest?.sessionSenderId
@@ -288,6 +291,7 @@ export function createTurnMethods(
         actor,
         conversation,
         origin,
+        modelAccount: origin.kind === "human" ? modelAccount : ("company" as const),
         text: req.text,
         ...(req.gatewayContext ? { gatewayContext: req.gatewayContext } : {}),
         ...(req.proactiveOpener ? { proactiveOpener: true } : {}),
@@ -336,7 +340,6 @@ export function createTurnMethods(
       }
       const blocked = await pendingApprovalResultForThread(conversation.threadRef, actor.id, { alwaysBlock: true });
       let request = input;
-      let idleDelivery: { threadRef: string; target: string } | undefined;
       if (blocked) {
         const record = req.approval ? await deps.approvals?.get(req.approval.requestId) : undefined;
         const blockedSession = blocked.sessionId ? await deps.sessions.get(blocked.sessionId) : null;
@@ -391,104 +394,19 @@ export function createTurnMethods(
         !req.spawned &&
         !req.idempotencyKey
       ) {
-        const conversationRouting =
-          req.surface === "slack" && conversation.kind === "dm" && origin.kind === "human" && !req.botActor;
-        if (conversationRouting && input.deliveryTarget && !req.gatewayContext?.details?.thread_ts) {
-          idleDelivery = { threadRef: conversation.threadRef, target: input.deliveryTarget.split(":")[0]! };
-        }
-        const conversationRuns = conversationRouting
-          ? (await deps.runs.list({ threadRef: conversation.threadRef })).filter(
-              (run) => run.request.actor.id === actor.id && resolveTurnOrigin(run.request).kind === "human",
-            )
-          : [];
-        const relatedRuns = conversationRuns.filter(
-          (run) => !run.sessionId.startsWith(`${conversation.threadRef}:status:`),
-        );
-        let live =
-          (await deps.runs.activeForThread(conversation.threadRef)) ??
-          relatedRuns.find((run) => !isTerminal(run.status)) ??
-          (redeliveryKey && deps.ambientJudge && !req.botActor ? relatedRuns[0] : null) ??
-          null;
-        let targetedCancel = false;
+        const live = await deps.runs.activeForThread(conversation.threadRef);
         const liveOriginKind = live ? resolveTurnOrigin(live.request).kind : undefined;
         const personIntoAutomation =
           liveOriginKind === "automation" &&
           (origin.kind === "human" || (origin.kind === "ambient" && origin.live === true)) &&
           !(origin.kind === "human" && isHalt(req.text));
         if (live && redeliveryKey && live.dedupKey === redeliveryKey) return { status: "silent" };
-        if (live && !personIntoAutomation) {
-          if (
-            conversationRouting &&
-            origin.kind === "human" &&
-            !req.botActor &&
-            redeliveryKey &&
-            deps.ambientJudge &&
-            live.request.actor.id === actor.id &&
-            liveOriginKind === "human"
-          ) {
-            const sourceSession = await deps.sessions.getByThread(live.request.conversation.threadRef);
-            if (!sourceSession || (await deps.sessions.participantsOf(sourceSession.id)).includes(actor.id)) {
-              const decision = await conversationFollowup({
-                request: input,
-                live,
-                entries: sourceSession ? await deps.sessions.visibleEntries(sourceSession.id, actor.id) : [],
-                relatedRuns: conversationRuns,
-                entriesForTask: async (run) => {
-                  const session = await deps.sessions.getByThread(run.request.conversation.threadRef);
-                  if (!session || !(await deps.sessions.participantsOf(session.id)).includes(actor.id)) return [];
-                  return deps.sessions.visibleEntries(session.id, actor.id);
-                },
-                sourceKey: redeliveryKey,
-                judge: async (system, prompt, signal) => {
-                  const started = Date.now();
-                  const raw = await deps.ambientJudge!(system, prompt, signal);
-                  deps.auditLog.record({
-                    at: Date.now(),
-                    principalId: actor.id,
-                    action: "conversation.route",
-                    resource: redeliveryKey,
-                    scopeLabel: conversationScope(conversation, actor.id),
-                    status: raw ? "answered" : "unavailable",
-                    detail: JSON.stringify({ latencyMs: Date.now() - started, input: JSON.parse(prompt), raw }),
-                  });
-                  return raw;
-                },
-              });
-              if (!decision) throw new Error("Conversation routing did not resolve; message must be retried");
-              if ("target" in decision) {
-                live = decision.target;
-                targetedCancel = decision.cancel;
-                if (isTerminal(live.status)) {
-                  if (targetedCancel) return { status: "ok", reply: "That task has already finished." };
-                  const { run, deduped } = await deps.runs.enqueue({
-                    sessionId: live.sessionId,
-                    request: {
-                      ...input,
-                      deliveryTarget: req.gatewayContext?.details?.thread_ts
-                        ? input.deliveryTarget
-                        : (live.request.deliveryTarget ?? input.deliveryTarget),
-                      conversation: { ...input.conversation, threadRef: live.request.conversation.threadRef },
-                    },
-                    dedupKey: redeliveryKey,
-                    maxAttempts: deps.maxAttempts,
-                  });
-                  if (deduped) return { status: "silent" };
-                  return req.async ? { status: "queued", runId: run.id, conversationAside: true } : drive(run.id);
-                }
-              } else {
-                const statusRequest = decision.request;
-                const { run, deduped } = await deps.runs.enqueue({
-                  sessionId: statusRequest.conversation.threadRef,
-                  request: statusRequest,
-                  ...(statusRequest.deliveryTarget === input.deliveryTarget ? { idleDelivery } : {}),
-                  dedupKey: redeliveryKey,
-                  maxAttempts: deps.maxAttempts,
-                });
-                if (deduped) return { status: "silent" };
-                return req.async ? { status: "queued", runId: run.id, conversationAside: true } : drive(run.id);
-              }
-            }
-          }
+        const sameAccount =
+          live?.request.modelAccount !== undefined &&
+          live.request.modelAccount === input.modelAccount &&
+          (input.modelAccount === "company" || live.request.actor.id === actor.id);
+        const cancel = origin.kind === "human" && isHalt(req.text);
+        if (live && !isTerminal(live.status) && !personIntoAutomation && (cancel || sameAccount)) {
           const targetRun = live;
           const steerText = attributedSteerText(
             actor,
@@ -508,11 +426,6 @@ export function createTurnMethods(
               return req.async ? { status: "queued", runId: targetRun.id, steered: true } : drive(targetRun.id);
             if (decision === "unscreened") injectedText = `${unscreenedNotice("mid-turn message")}\n${steerText}`;
           }
-          // A mid-run message can carry files. They can't be materialized into
-          // the live turn's inbox, but the run must hear about them — name
-          // them in the steer (with the message ts so the agent can pull each
-          // via the surface-file API), and never report a captionless file as
-          // steered while silently dropping it.
           const fileNames = (req.attachments ?? []).map((a) =>
             a.sourceId
               ? `${a.name} (fetch via surface-file, ts ${origin.kind === "human" ? (origin.messageTs ?? origin.entryTs) : origin.entryTs})`
@@ -522,7 +435,7 @@ export function createTurnMethods(
             situation: origin.kind === "ambient" ? "ambientUpdate" : "addressed",
             ts: String(req.clientSentAt ?? Date.now()),
             text: injectedText,
-            halt: origin.kind === "human" && (targetedCancel || isHalt(req.text)),
+            halt: origin.kind === "human" && isHalt(req.text),
             ...(fileNames.length ? { fileNames } : {}),
           };
           const route = routeWake(wake, true, resolveTurnOrigin(targetRun.request).kind === "ambient");
@@ -535,19 +448,7 @@ export function createTurnMethods(
                   kind: route.signal,
                   ...(route.text ? { text: route.text } : {}),
                   ...(steerTs ? { ts: steerTs } : {}),
-                  ...(route.signal === "steer"
-                    ? {
-                        request: {
-                          ...req,
-                          ...(conversationRouting
-                            ? {
-                                deliveryTarget: targetRun.request.deliveryTarget ?? req.deliveryTarget,
-                              }
-                            : {}),
-                          conversation: { ...req.conversation, threadRef: targetRun.request.conversation.threadRef },
-                        },
-                      }
-                    : {}),
+                  ...(route.signal === "steer" ? { request: req } : {}),
                   ...(redeliveryKey ? { dedupeKey: redeliveryKey } : {}),
                 }));
               return targetRun.id;
@@ -589,7 +490,12 @@ export function createTurnMethods(
         const ambientSession = await deps.sessions.getByThread(ambientRef);
         if (ambientSession) {
           const liveAmbient = await deps.runs.activeForThread(ambientRef);
-          if (liveAmbient && !isTerminal(liveAmbient.status)) {
+          if (
+            liveAmbient &&
+            !isTerminal(liveAmbient.status) &&
+            input.modelAccount === "company" &&
+            liveAmbient.request.modelAccount === "company"
+          ) {
             const routedRunId = await withCurrentProjectRoster(async () => {
               if (deps.signals)
                 await deps.signals.send(liveAmbient.id, {
@@ -625,7 +531,6 @@ export function createTurnMethods(
         deps.runs.enqueue({
           sessionId: conversation.threadRef,
           request,
-          idleDelivery,
           maxAttempts: deps.maxAttempts,
           ...(dedupKey ? { dedupKey } : {}),
         });
@@ -811,12 +716,47 @@ export function createTurnMethods(
       const run = await deps.runs.get(runId);
       if (!run) return { accepted: false, reason: "not_found" };
       if (viewer && !(await viewerMayUseRun(run, viewer))) return { accepted: false, reason: "not_found" };
+      const queuedKey = signal.queuedRunId
+        ? `queued-steer:${run.request.conversation.threadRef}:${signal.queuedRunId}`
+        : undefined;
+      if (queuedKey && (await deps.signals.hasDedupeKey(queuedKey))) return { accepted: true };
       if (isTerminal(run.status)) return { accepted: false, reason: "terminal" };
-      if (signal.kind === "steer" && !signal.text?.trim()) {
+      if (signal.queuedRunId) {
+        const queued = await deps.runs.get(signal.queuedRunId);
+        if (!queued || (viewer && !(await viewerMayUseRun(queued, viewer))))
+          return { accepted: false, reason: "not_found" };
+        if (
+          signal.kind !== "steer" ||
+          !signal.request ||
+          queued.request.conversation.threadRef !== run.request.conversation.threadRef
+        )
+          return { accepted: false, reason: "conversation_mismatch" };
+        if (queued.id === run.id || queued.status !== "pending") return { accepted: false, reason: "queued_started" };
+        const text = queued.request.displayText ?? queued.request.text;
+        signal = {
+          ...signal,
+          text,
+          ts: queuedKey,
+          dedupeKey: queuedKey,
+          request: { ...signal.request, text, attachments: queued.request.attachments, idempotencyKey: queuedKey },
+        };
+      }
+      if (signal.kind === "steer" && !signal.text?.trim() && !signal.request?.attachments?.length) {
         return { accepted: false, reason: "text_required" };
       }
       if (signal.request && signal.request.conversation.threadRef !== run.request.conversation.threadRef) {
         return { accepted: false, reason: "conversation_mismatch" };
+      }
+      if (signal.kind === "steer") {
+        const principal = viewer ?? signal.request?.actor.externalId ?? run.request.actor.id;
+        const account = principal ? await deps.config.getModelAccountDurable(principal) : undefined;
+        if (
+          !account ||
+          run.request.modelAccount !== account ||
+          (account !== "company" && run.request.actor.id !== principal)
+        ) {
+          return { accepted: false, reason: "account_changed: send a new message to use your selected AI account" };
+        }
       }
       let outbound = signal;
       if (signal.kind === "steer") {
@@ -829,10 +769,16 @@ export function createTurnMethods(
         outbound = {
           ...signal,
           ts: signal.ts ?? `${Date.now()}.${crypto.randomUUID().slice(0, 8)}`,
-          ...(steerer ? { text: attributedSteerText(steerer, run.request.actor.id, signal.text!) } : {}),
+          ...(steerer ? { text: attributedSteerText(steerer, run.request.actor.id, signal.text ?? "") } : {}),
         };
       }
-      await deps.signals.send(runId, outbound);
+      if (signal.queuedRunId) {
+        if (!(await deps.runs.steerQueued(signal.queuedRunId, runId, outbound, deps.signals))) {
+          if (await deps.signals.hasDedupeKey(queuedKey!)) return { accepted: true };
+          const queued = await deps.runs.get(signal.queuedRunId);
+          return { accepted: false, reason: queued?.status === "pending" ? "queued_changed" : "queued_started" };
+        }
+      } else await deps.signals.send(runId, outbound);
       const after = await deps.runs.get(runId);
       if (!after || isTerminal(after.status)) {
         const drained = await replayOrphanedRunSignals(runId);

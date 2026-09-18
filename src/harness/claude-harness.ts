@@ -1,3 +1,4 @@
+import { documentBlocks } from "./document-inputs.ts";
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { chownSync, mkdtempSync, rmSync } from "node:fs";
@@ -261,6 +262,8 @@ function streamDelta(message: SDKMessage): { text?: string; textStart?: boolean 
 export function stripClaudeImageBytes(message: SDKMessage): unknown {
   return JSON.parse(
     JSON.stringify(message, function (key, value) {
+      if (value && typeof value === "object" && value.type === "document")
+        return { type: "text", text: "[document omitted; restored from attachments]" };
       return key === "data" && typeof value === "string" && (this as { type?: unknown }).type === "base64"
         ? "[image omitted]"
         : value;
@@ -288,6 +291,17 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
 
   const runPrompt = async (turn: HarnessTurnInput, toolsEnabled = true): Promise<HarnessTurnResult> => {
     if (turn.cancel?.aborted) return { reply: "", stopped: true };
+    const documentTextBudget = { remaining: 100_000 };
+    const preparedDocuments = await documentBlocks(
+      turn.documents ?? [],
+      {
+        api: "anthropic-messages",
+        provider: "anthropic",
+        input: ["image"],
+      },
+      documentTextBudget,
+      turn.cancel,
+    );
     const jail = mkdtempSync(join(tmpdir(), "qm-claude-"));
     const processIdentity = claudeProcessIdentity();
     if (processIdentity) chownSync(jail, processIdentity.uid, processIdentity.gid);
@@ -348,6 +362,9 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
     const turnEffort = effort(turn.runtime?.effortLevel);
     const text = promptText(turn);
     const initial = userMessage(text, turn.images);
+    if (turn.documents?.length && Array.isArray(initial.message.content)) {
+      initial.message.content.push(...(preparedDocuments as unknown as typeof initial.message.content));
+    }
     let pendingPrompts = 1;
     let stopped = false;
     let interrupted = false;
@@ -363,7 +380,7 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
     let recordedSteps = 0;
     let lastTotalCostUsd = 0;
     let settled = false;
-    const steerPrompts: string[] = [];
+    const steerPrompts: SDKUserMessage[] = [];
     let streamedText = "";
     let initialUserEchoSkipped = false;
     const appendTape = async (payload: unknown, trigger = false) => {
@@ -467,15 +484,33 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
             turn.runId,
             {
               onAbort: async () => interrupt(true),
-              onSteer: async (steer, ts) => {
+              onSteer: async (steer, ts, request) => {
+                const prepared = await turn.prepareSteer?.(steer, request);
+                const prompt = prepared?.text ?? steer;
                 await turn.emit({
                   type: "user",
-                  payload: { text: steer, ...(ts ? { ts } : {}), steered: true },
+                  payload: {
+                    text: steer,
+                    ...(ts ? { ts } : {}),
+                    steered: true,
+                    ...(prepared?.attachments?.length ? { attachments: prepared.attachments } : {}),
+                  },
                   scopeLabel: turn.scopeLabel,
                 });
-                steerPrompts.push(steer);
+                const baseMessage = userMessage(prompt, prepared?.images);
+                steerPrompts.push(baseMessage);
+                const message = userMessage(prompt, prepared?.images);
+                if (Array.isArray(message.message.content))
+                  message.message.content.push(
+                    ...((await documentBlocks(
+                      prepared?.documents ?? [],
+                      { api: "anthropic-messages", provider: "anthropic", input: ["text", "image"] },
+                      documentTextBudget,
+                      turn.cancel,
+                    )) as unknown as typeof message.message.content),
+                  );
                 pendingPrompts++;
-                queue.push(userMessage(steer));
+                queue.push(message);
               },
             },
             { onError: (error) => swallow("claude signal poll", error) },
@@ -537,7 +572,7 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
     };
     try {
       await sdkQuery.initializationResult();
-      await appendTape(initial, true);
+      await appendTape(stripClaudeImageBytes(userMessage(text, turn.images)), true);
       queue.push(initial);
       const consume = (async () => {
         for await (const message of sdkQuery) {
@@ -571,8 +606,22 @@ export function createClaudeHarness(opts: ClaudeHarnessOptions = {}): Harness {
               });
           }
           if (message.type === "user" && !initialUserEchoSkipped) initialUserEchoSkipped = true;
-          else if (message.type === "assistant" || message.type === "user")
-            await appendTape(stripClaudeImageBytes(message));
+          else if (message.type === "assistant" || message.type === "user") {
+            let tapeMessage: SDKMessage = message;
+            if (message.type === "user" && Array.isArray(message.message.content)) {
+              const text = message.message.content.find((block) => block.type === "text")?.text;
+              const index = steerPrompts.findIndex(
+                (prompt) =>
+                  Array.isArray(prompt.message.content) &&
+                  prompt.message.content.some((block) => block.type === "text" && block.text === text),
+              );
+              if (index >= 0) {
+                const [base] = steerPrompts.splice(index, 1);
+                tapeMessage = { ...message, message: { ...message.message, content: base!.message.content } };
+              }
+            }
+            await appendTape(stripClaudeImageBytes(tapeMessage));
+          }
           if (message.type === "system" && message.subtype === "task_started") {
             const callId = message.tool_use_id ?? message.task_id;
             if (!taskStates.has(message.task_id)) {

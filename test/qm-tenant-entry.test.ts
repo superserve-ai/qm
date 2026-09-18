@@ -2,7 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 
 const ENTRY = join(import.meta.dirname, "../scripts/qm-tenant-entry.mjs");
 const ENTRY_TIMEOUT_MS = 30_000;
@@ -20,8 +23,8 @@ interface EntryRun {
   stderr: string;
 }
 
-async function runEntry(overrides: Record<string, string>): Promise<EntryRun> {
-  const child = spawn(process.execPath, [ENTRY], {
+async function runEntry(overrides: Record<string, string>, entry = ENTRY): Promise<EntryRun> {
+  const child = spawn(process.execPath, [entry], {
     env: { ...BASE_ENV, ...overrides },
     stdio: ["ignore", "pipe", "pipe"],
     signal: AbortSignal.timeout(ENTRY_TIMEOUT_MS),
@@ -55,7 +58,7 @@ test("tenant entry rejects a ready timeout that overflows a node timer", async (
 test("tenant entry rejects a drain window that would overflow the shutdown timer", async () => {
   const { code, stderr } = await runEntry({ SHUTDOWN_DRAIN_MS: "2147483647" });
   assert.equal(code, 2);
-  assert.match(stderr, /SHUTDOWN_DRAIN_MS must be an integer between 0 and 2147474647/);
+  assert.match(stderr, /SHUTDOWN_DRAIN_MS must be an integer between 0 and 2147472647/);
 });
 
 function millis(source: string, pattern: RegExp): number {
@@ -77,18 +80,21 @@ test("tenant entry waits out core's drain and its lease-release backstop", () =>
     millis(entry, /const LEASE_RELEASE_MS = ([\d_]+);/),
     millis(core, /releaseInFlightRuns\(\), sleep\(([\d_]+),/),
   );
+  const reporting = readFileSync(join(import.meta.dirname, "../plugins/chassis/src/error-reporting.ts"), "utf8");
+  assert.equal(millis(entry, /const ERROR_FLUSH_MS = ([\d_]+);/), millis(reporting, /const FLUSH_MS = ([\d_]+);/));
   assert.ok(millis(entry, /const KILL_MARGIN_MS = ([\d_]+);/) > 0);
 });
 
-test("the image's drain default leaves the shutdown sequence inside a 10s termination grace", () => {
+test("the image's drain default leaves the shutdown sequence inside a 12s termination grace", () => {
   const entry = readFileSync(ENTRY, "utf8");
   const dockerfile = readFileSync(join(import.meta.dirname, "../deploy/superserve/Dockerfile"), "utf8");
   const backstop =
     millis(entry, /const DRAIN_BACKSTOP_MS = ([\d_]+);/) +
     millis(entry, /const LEASE_RELEASE_MS = ([\d_]+);/) +
+    millis(entry, /const ERROR_FLUSH_MS = ([\d_]+);/) +
     millis(entry, /const KILL_MARGIN_MS = ([\d_]+);/);
   const drain = millis(dockerfile, /ENV SHUTDOWN_DRAIN_MS=([\d_]+)/);
-  assert.ok(drain + backstop <= 10_000, `drain ${drain} + backstop ${backstop} exceeds a 10s grace`);
+  assert.ok(drain + backstop <= 12_000, `drain ${drain} + backstop ${backstop} exceeds a 12s grace`);
 });
 
 test("tenant entry accepts the top of the port range", async () => {
@@ -151,4 +157,85 @@ test("tenant entry rejects colliding service ports", async () => {
   const { code, stderr } = await runEntry({ PORT: "45080", QM_CORE_PORT: "45080", AUTH_EMBEDDED: "0" });
   assert.equal(code, 2);
   assert.match(stderr, /PORT, QM_CORE_PORT, QM_WEB_UI_PORT must all differ/);
+});
+
+test("tenant surfaces receive reporting configuration without core credentials", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qm-tenant-env-"));
+  const reservations = await Promise.all(
+    Array.from({ length: 3 }, async () => {
+      const server = createServer();
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      return server;
+    }),
+  );
+  const ports = reservations.map((server) => String((server.address() as { port: number }).port));
+  await Promise.all(reservations.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+  try {
+    await mkdir(join(root, "scripts"), { recursive: true });
+    await cp(ENTRY, join(root, "scripts/qm-tenant-entry.mjs"));
+    await cp(
+      join(import.meta.dirname, "../scripts/qm-tenant-loopback.mjs"),
+      join(root, "scripts/qm-tenant-loopback.mjs"),
+    );
+    const service = (name: string) => `
+      import { createServer } from "node:http";
+      console.log(JSON.stringify({ service: ${JSON.stringify(name)}, env: process.env }));
+      createServer((req, res) => { res.end("ok"); }).listen(Number(process.env.PORT), "127.0.0.1");
+    `;
+    const files = {
+      "src/migrate-main.ts": "process.exit(0);",
+      "src/index.ts": service("core"),
+      "plugins/web-ui/server/index.ts": service("web"),
+      "plugins/portal/src/index.ts":
+        'console.log(JSON.stringify({ service: "portal", env: process.env })); process.exit(1);',
+    };
+    for (const [path, contents] of Object.entries(files)) {
+      const target = join(root, path);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, contents);
+    }
+    const reporting = {
+      SENTRY_DSN: "https://public@example.com/1",
+      SENTRY_ENVIRONMENT: "test",
+      SENTRY_DEPLOYMENT: "test-tenant",
+      SENTRY_RELEASE: "test-release",
+      POSTHOG_API_KEY: "phc_test",
+      POSTHOG_HOST: "https://analytics.example.com",
+    };
+    const { code, stdout, stderr } = await runEntry(
+      {
+        ...reporting,
+        PORT: ports[0]!,
+        QM_CORE_PORT: ports[1]!,
+        QM_WEB_UI_PORT: ports[2]!,
+        AUTH_EMBEDDED: "0",
+        SUPERSERVE_API_KEY: "test-core-only",
+        SENTRY_AUTH_TOKEN: "test-build-only",
+      },
+      join(root, "scripts/qm-tenant-entry.mjs"),
+    );
+    assert.equal(code, 1, stderr);
+    const environments = Object.fromEntries(
+      stdout
+        .split("\n")
+        .filter((line) => line.startsWith('{"service":'))
+        .map((line) => {
+          const { service, env } = JSON.parse(line);
+          return [service, env];
+        }),
+    );
+    for (const name of ["web", "portal"]) {
+      const env = environments[name];
+      assert.ok(env, stdout + stderr);
+      for (const key of ["SENTRY_DSN", "SENTRY_ENVIRONMENT", "SENTRY_DEPLOYMENT", "SENTRY_RELEASE"])
+        assert.equal(env[key], reporting[key as keyof typeof reporting]);
+      for (const key of ["SUPERSERVE_API_KEY", "DATABASE_URL", "SENTRY_AUTH_TOKEN"]) assert.equal(env[key], undefined);
+    }
+    assert.equal(environments.web.POSTHOG_API_KEY, reporting.POSTHOG_API_KEY);
+    assert.equal(environments.web.POSTHOG_HOST, reporting.POSTHOG_HOST);
+    assert.equal(environments.portal.POSTHOG_API_KEY, undefined);
+    assert.equal(environments.core.SUPERSERVE_API_KEY, "test-core-only");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

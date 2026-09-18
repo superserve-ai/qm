@@ -18,6 +18,7 @@ primary_region = "sjc"
   OIDC_PRINCIPAL_CLAIM = "email"
   OIDC_ALLOWED_EMAIL_DOMAIN = "example.com"
 
+  ADMIN_ENABLED = "1"
 [http_service]
   internal_port = 8080
   force_https = true

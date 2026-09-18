@@ -24,7 +24,7 @@ The provisioner must configure the Cloud Run service with CPU always allocated (
 Failure and shutdown:
 
 - If any child exits, the supervisor sends `SIGTERM` to the rest and exits `1`; Cloud Run restarts the container. Stragglers are `SIGKILL`ed after 3 s, or after core's full drain and lease-release window when core is one of them.
-- On `SIGTERM`/`SIGINT` the supervisor signals core first and keeps portal and web-ui serving until core has exited, so in-flight public requests are not reset while runs drain. Core drains workers for `SHUTDOWN_DRAIN_MS` (image default `1000`); if that stop wedges, core's own backstop fires 5 s later and it then spends up to 3 s releasing in-flight run leases. Core then allows up to 2 s to flush error reporting. The supervisor waits for that whole sequence plus 1 s before `SIGKILL`, then exits `0`. Allow at least `SHUTDOWN_DRAIN_MS + 11000` ms of platform termination grace (12 s with the image default). A platform with a shorter fixed grace period can interrupt the final shutdown steps.
+- On `SIGTERM`/`SIGINT` the supervisor signals core first and keeps portal and web-ui serving until core has exited, so in-flight public requests are not reset while runs drain. Core drains workers for `SHUTDOWN_DRAIN_MS` (image default `1000`); if that stop wedges, core's own backstop fires 5 s later and it then spends up to 3 s releasing in-flight run leases. Core flushes error reporting concurrently with that final lease-release window, allowing up to 2 s. The supervisor waits for that whole sequence plus 1 s before `SIGKILL`, then exits `0`. Allow at least `SHUTDOWN_DRAIN_MS + 9000` ms of platform termination grace (10 s with the image default). A platform with a shorter fixed grace period can interrupt the final shutdown steps.
 - The supervisor logs child lifecycle events only, prefixed `[tenant]`. It never prints environment values.
 
 Core and web-ui do not read a bind address from their environment (`server.listen(PORT)` in `src/index.ts` and `plugins/web-ui/server/index.ts`), so the supervisor preloads `scripts/qm-tenant-loopback.mjs` into those two children. It rewrites any `listen(port)` without an explicit host to `127.0.0.1`. Portal is started without the shim.
@@ -49,7 +49,7 @@ Web-ui and portal receive an allowlisted subset of the environment (their own `W
 
 The three port variables must each be a TCP port between 1 and 65535 and must differ from one
 another; `8099` is reserved as well, but only while the embedded broker is running. The two
-millisecond variables must fit a Node timer, and `SHUTDOWN_DRAIN_MS` leaves room for the eleven
+millisecond variables must fit a Node timer, and `SHUTDOWN_DRAIN_MS` leaves room for the nine
 seconds the supervisor adds on top so core can finish its own backstop and release in-flight
 run leases and flush error reporting. The supervisor rejects anything else at startup with exit code 2 rather than
 booting into a readiness timeout or killing core mid-drain.
@@ -242,7 +242,7 @@ Checks worth repeating after changes:
 curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/healthz     # 200 once portal is up
 curl -s localhost:8081/healthz                                        # connection refused: core is loopback only
 docker exec qm-tenant pkill -f /app/src/index.ts                      # kill core: container exits 1 within 5 s
-docker stop -t 20 qm-tenant                                           # drain log, exit 0
+docker stop -t 10 qm-tenant                                           # drain log, exit 0
 ```
 
 Tear down with `docker compose -f deploy/superserve/compose.yaml down -v`.

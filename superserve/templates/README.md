@@ -1,76 +1,48 @@
-# Superserve templates
+# Agent template
 
-`qm-agent.ts` builds the **`qm-agent-<release>`** Superserve template: the pre-baked
-Firecracker VM image that QM scope sandboxes boot from when `SANDBOX_BACKEND=superserve`.
-Sandboxes created from a ready template come up in seconds with the toolset already
-installed, instead of installing it on every provision.
+`qm-agent.ts` builds the `qm-agent-<release>` template used by the Superserve
+sandbox backend.
 
-The template mirrors the tool inventory of `fly/Dockerfile` (the shared sandbox base
-image) adapted to a Superserve BuildSpec on `ubuntu:24.04`, with the same pinned versions.
+## Contents
 
-## What the template contains
+The template uses `ubuntu:24.04` on linux/amd64 and includes:
 
-| Layer      | Contents                                                                                                                                                                                               |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Base       | `ubuntu:24.04` (Superserve build VMs are linux/amd64)                                                                                                                                                  |
-| apt        | bash, coreutils (incl. `timeout`), findutils, grep, sed, gawk, git, curl, wget, jq, unzip, tar, xz-utils, openssh-client, ca-certificates, gnupg                                                       |
-| Python     | python3, python3-venv, python3-pip; a venv at `/opt/agent-venv` with pip upgraded, exported as `VIRTUAL_ENV`; `python`, `python3`, `pip`, `pip3` on `PATH` resolve to it via `/usr/local/bin` wrappers |
-| Node       | Node + npm from the checksum-verified nodejs.org tarball, pinned to the version `fly/Dockerfile` gets from its digest-pinned `node:24-slim` stage                                                      |
-| Agent CLIs | `claude` (`@anthropic-ai/claude-code`) and `codex` (`@openai/codex`), global npm installs pinned to the Dockerfile versions                                                                            |
-| Other CLIs | `gh` (GitHub CLI) and AWS CLI v2, checksum-verified downloads pinned to the Dockerfile versions                                                                                                        |
-| Tools      | `/usr/local/bin/x-api` (copied from `fly/tools/x-api` at build time)                                                                                                                                   |
-| Runtime    | Commands run as `root`; the exec daemon injects `HOME=/home/user` and its own `PATH`, so the backend exports `HOME=/root` (or `SUPERSERVE_HOME_DIR`) on every command; default cwd `/root/workspace`   |
+- Shell and file utilities, Git, curl, jq, and SSH.
+- Node and npm, Python with a virtual environment at `/opt/agent-venv`.
+- Coding-agent CLIs, `gh`, `aws`, and `x-api`.
 
-Default VM shape is 2 vCPU / 2048 MiB memory / 8192 MiB disk (`--vcpu`, `--memory-mib`,
-`--disk-mib` override). Sandboxes inherit the shape from the template.
+Tool versions are pinned in the build script. Downloaded Node and CLI archives
+are checksum-verified. Python and pip wrappers select the virtual environment
+regardless of the exec environment's `PATH`. Commands run as root; QM sets `HOME`
+to `SUPERSERVE_HOME_DIR` (default `/root`) and uses `<home>/workspace`.
 
-Deliberately **not** in the template:
+Deployment tools and skills are installed during provisioning. The optional
+browser engine is not included.
 
-- Per-deployment tools and skills: the backend materializes those at provision time.
-- `nftables`: egress is not enforced inside the VM on Superserve.
-- A `PATH` override: the exec daemon supplies its own `PATH` and `HOME` at runtime, so template
-  `env` steps for those are ignored (other `env` steps, e.g. `VIRTUAL_ENV`, do carry through).
-  The backend explicitly exports `HOME` from `SUPERSERVE_HOME_DIR` (default `/root`), so scope
-  workspaces land in that directory's `workspace` subdirectory.
-- The optional browser engine (`INSTALL_BROWSER_ENGINE=1` in the Dockerfile). The Dockerfile
-  relies on Debian's apt `chromium`; on Ubuntu 24.04 that package is a snap stub that does
-  not run in a VM without snapd, so a different install path is needed before this can be
-  offered as a build flag.
+The default Superserve sandbox has 2 vCPUs, 2048 MiB memory, and 8192 MiB disk. Override these with
+`--vcpu`, `--memory-mib`, and `--disk-mib` when building.
 
-## Build it for a release
+## Build
 
 ```sh
-export SUPERSERVE_API_KEY=ss_live_...
+export SUPERSERVE_API_KEY=your-superserve-api-key
 node superserve/templates/qm-agent.ts --release 0.1.0 --wait
 ```
 
-Export `SUPERSERVE_BASE_URL` (or pass `--base-url`) to build against a non-production API.
+`--release` names the template; use the release tag your deployment runs.
+`--wait` streams logs until the build completes. Without it, the script returns
+after queuing the build. Use `--base-url` or `SUPERSERVE_BASE_URL` to override the
+API endpoint.
 
-- `--release` is required and must be the QM release tag the deployment runs (the root
-  `package.json` version does not track releases); the template is named `qm-agent-<release>`.
-- `--wait` streams build logs and blocks until the build is ready (or fails with a
-  `BuildError` code such as `step_failed`). Without it the build is queued and the script
-  returns immediately.
-- The script is idempotent: if `qm-agent-<release>` already exists and is ready it prints the
-  template and exits 0. Pass `--force` to delete and rebuild it. A previously failed template
-  with the same name is deleted and rebuilt automatically.
-- `--base-url` overrides `SUPERSERVE_BASE_URL`.
+A ready template with the same name is reused. Failed builds are replaced;
+`--force` also replaces a ready template. Names are unique within a team.
 
-Template names are unique per team, so one build per release per Superserve team is enough.
-Bumping a pinned CLI version in `qm-agent.ts` for an already-built release requires `--force`.
-Existing sandboxes keep their original disk after an in-place rebuild. Changing
-`SUPERSERVE_TEMPLATE` to a different name replaces existing scope sandboxes and deletes
-their resident disks; export needed files first. See the [backend configuration and
-rollout guide](../../docs/superserve.md).
+Set `SUPERSERVE_TEMPLATE=qm-agent-<release>` on core after the build succeeds.
+The backend requires a ready template with this toolchain.
 
-## How the backend picks it
-
-Set `SUPERSERVE_TEMPLATE=qm-agent-<release>` on the QM deployment (alongside
-`SUPERSERVE_API_KEY`, and `SUPERSERVE_BASE_URL` if not using production). Every scope and
-scratch sandbox the Superserve backend creates is then booted `fromTemplate` that name.
-`SUPERSERVE_TEMPLATE` is mandatory: core refuses to start with `SANDBOX_BACKEND=superserve`
-and no template, because Superserve's stock image ships only `ca-certificates`, `curl`, and
-`git`, which is not enough for an agent turn.
+Rebuilding under the same name does not update existing sandboxes. Changing
+`SUPERSERVE_TEMPLATE` to a different name replaces them and deletes their resident
+files. Export needed files first; see [updates and retention](../../docs/superserve.md#updates-and-retention).
 
 ## Verify
 
@@ -78,11 +50,10 @@ and no template, because Superserve's stock image ships only `ca-certificates`, 
 node superserve/templates/verify-qm-agent.ts --release 0.1.0
 ```
 
-The verifier boots a throwaway sandbox from the template, measures cold boot to first exec,
-prints `$HOME`, `whoami`, `uname -a`, `PATH`, runs a `command -v` inventory of every expected
-tool plus `--version` for each CLI, checks that `timeout` and the venv behave the way the
-backend expects, then kills the sandbox. An interrupt (Ctrl-C or `SIGTERM`) kills it on the
-way out too, so a cancelled run does not leave a sandbox running and billing. `--keep` keeps it
-alive for inspection and arms a one-hour auto-delete window instead of killing it; without
-`--keep` the sandbox is also configured to delete itself the moment it pauses, so even a
-`SIGKILL`ed verifier cannot strand it. It exits non-zero if any expected tool is missing.
+The verifier creates a sandbox, checks its tools, workspace, Python environment,
+and command timeout behavior, then deletes it. It exits nonzero if verification
+or cleanup fails. `--template` selects a template directly instead of by release.
+
+`--keep` retains the sandbox for inspection and schedules deletion one hour after
+it pauses. Otherwise, automatic deletion on pause backs up explicit cleanup,
+including when the verifier is interrupted.

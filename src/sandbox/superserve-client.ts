@@ -1,3 +1,5 @@
+import { errMessage } from "../util/errors.ts";
+
 export interface SuperserveCommandResult {
   stdout: string;
   stderr: string;
@@ -84,45 +86,6 @@ export interface SdkSuperserveClientOptions {
 const DEFAULT_MAX_COMMAND_MS = 3600_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 
-export interface OutputLimiter {
-  stdout(chunk: string): void;
-  stderr(chunk: string): void;
-  text(stream: "stdout" | "stderr"): string;
-  truncated(): boolean;
-}
-
-export function createOutputLimiter(maxBytes: number): OutputLimiter {
-  const streams = {
-    stdout: { text: "", bytes: 0, done: false },
-    stderr: { text: "", bytes: 0, done: false },
-  };
-  let truncated = false;
-  const take = (stream: { text: string; bytes: number; done: boolean }, chunk: string): void => {
-    if (stream.done) {
-      truncated = true;
-      return;
-    }
-    const room = maxBytes - stream.bytes;
-    const chunkBytes = Buffer.byteLength(chunk, "utf8");
-    if (chunkBytes <= room) {
-      stream.text += chunk;
-      stream.bytes += chunkBytes;
-      return;
-    }
-    truncated = true;
-    stream.done = true;
-    const kept = clampUtf8(chunk, room);
-    stream.text += kept;
-    stream.bytes += Buffer.byteLength(kept, "utf8");
-  };
-  return {
-    stdout: (chunk) => take(streams.stdout, chunk),
-    stderr: (chunk) => take(streams.stderr, chunk),
-    text: (stream) => streams[stream].text,
-    truncated: () => truncated,
-  };
-}
-
 export const clampUtf8 = (text: string, maxBytes: number): string => {
   if (maxBytes <= 0) return "";
   const encoded = Buffer.from(text, "utf8");
@@ -133,16 +96,12 @@ export const clampUtf8 = (text: string, maxBytes: number): string => {
 };
 const GONE_STATES: ReadonlySet<string> = new Set(["deleted", "failed"]);
 
-function isGoneError(err: unknown): boolean {
-  const name = String((err as Error)?.name ?? "");
-  const msg = String((err as Error)?.message ?? err);
-  return name === "NotFoundError" || /sandbox (was )?not found|not found|no such sandbox|410/i.test(msg);
+function hasStatus(err: unknown, statusCode: number): boolean {
+  return typeof err === "object" && err !== null && (err as { statusCode?: unknown }).statusCode === statusCode;
 }
 
-function isFileMissing(err: unknown): boolean {
-  const name = String((err as Error)?.name ?? "");
-  const msg = String((err as Error)?.message ?? err);
-  return name === "NotFoundError" || /no such file|not found|404/i.test(msg);
+function isGoneError(err: unknown): boolean {
+  return hasStatus(err, 404) || hasStatus(err, 410);
 }
 
 export function createSdkSuperserveClient(opts: SdkSuperserveClientOptions): SuperserveClient {
@@ -152,18 +111,15 @@ export function createSdkSuperserveClient(opts: SdkSuperserveClientOptions): Sup
   type Sdk = typeof import("@superserve/sdk");
   let sdk: Promise<Sdk> | null = null;
   const loadSdk = (): Promise<Sdk> =>
-    (sdk ??= import("@superserve/sdk").then(
-      (m) => m as unknown as Sdk,
-      (e) => {
-        sdk = null;
-        throw new Error(`the @superserve/sdk package is not installed: ${String((e as Error)?.message ?? e)}`);
-      },
-    ));
+    (sdk ??= import("@superserve/sdk").catch((e: unknown) => {
+      sdk = null;
+      throw e;
+    }));
 
   type SdkSandbox = Awaited<ReturnType<Sdk["Sandbox"]["create"]>>;
 
   const gone = (id: string, err: unknown): never => {
-    throw new SuperserveSandboxGoneError(id, String((err as Error)?.message ?? err));
+    throw new SuperserveSandboxGoneError(id, errMessage(err));
   };
 
   const wrap = (sbx: SdkSandbox): SuperserveSession => ({
@@ -171,18 +127,18 @@ export function createSdkSuperserveClient(opts: SdkSuperserveClientOptions): Sup
     async run(command, runOpts): Promise<SuperserveCommandResult> {
       const timeoutMs = runOpts?.timeoutMs ?? maxCommandMs;
       const cap = runOpts?.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
-      const limiter = createOutputLimiter(cap);
       try {
         const r = await sbx.commands.run(command, {
           timeoutMs,
-          onStdout: limiter.stdout,
-          onStderr: limiter.stderr,
+          onStdout: () => undefined,
         });
         return {
-          stdout: limiter.text("stdout") || clampUtf8(r.stdout ?? "", cap),
-          stderr: limiter.text("stderr") || clampUtf8(r.stderr ?? "", cap),
+          stdout: clampUtf8(r.stdout, cap),
+          stderr: clampUtf8(r.stderr, cap),
           exitCode: r.exitCode,
-          ...(limiter.truncated() || r.truncated ? { truncated: true } : {}),
+          ...(r.truncated || Buffer.byteLength(r.stdout, "utf8") > cap || Buffer.byteLength(r.stderr, "utf8") > cap
+            ? { truncated: true }
+            : {}),
         };
       } catch (err) {
         if (isGoneError(err)) gone(sbx.id, err);
@@ -193,7 +149,7 @@ export function createSdkSuperserveClient(opts: SdkSuperserveClientOptions): Sup
       try {
         return await sbx.files.read(absPath);
       } catch (err) {
-        if (isFileMissing(err)) {
+        if (hasStatus(err, 404)) {
           let status: string;
           try {
             status = (await sbx.getInfo()).status;
@@ -204,6 +160,7 @@ export function createSdkSuperserveClient(opts: SdkSuperserveClientOptions): Sup
           if (GONE_STATES.has(status)) gone(sbx.id, err);
           return null;
         }
+        if (isGoneError(err)) gone(sbx.id, err);
         throw err;
       }
     },

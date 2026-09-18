@@ -264,6 +264,11 @@ test("draft header links stay together after the label", () => {
   assert.doesNotMatch(css, /\.inbox-draft-head \.inbox-external-link \{[^}]*margin-left: auto;/);
 });
 
+test("draft header links share one text size", () => {
+  assert.match(css, /\.inbox-session-link,\s*\.inbox-external-link \{[^}]*font-size: 11px;/);
+  assert.doesNotMatch(css, /\.inbox-session-link \{[^}]*font-size:/);
+});
+
 test("suggested draft actions yield to typed instructions without reflow", () => {
   assert.match(inbox, /inbox-chat-composer \$\{pending\.trim\(\) \? "has-text" : ""\}/);
   assert.match(inbox, /if \(had !== Boolean\(box\.value\.trim\(\)\)\) drawAll\(\);/);

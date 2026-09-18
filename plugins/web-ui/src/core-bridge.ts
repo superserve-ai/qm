@@ -1,3 +1,4 @@
+import { captureMessage } from "./product-analytics.ts";
 import { streamedAnswer } from "./timeline.ts";
 import { EventType } from "@tanstack/ai/client";
 import { fetchServerSentEvents, StreamProcessor } from "@tanstack/ai-client";
@@ -810,6 +811,7 @@ export async function signalLiveRun(
   kind: "abort" | "steer",
   text: string | undefined,
   context: SteerContext,
+  queuedRunId?: string,
 ): Promise<SignalOutcome> {
   const run = slot.runId !== null ? { runId: slot.runId } : null;
   if (!run) throw new Error("No active run to signal.");
@@ -825,7 +827,12 @@ export async function signalLiveRun(
     await api(runPath(run.runId, "/signal"), {
       method: "POST",
       signal: kind === "abort" ? AbortSignal.timeout(RUN_REQUEST_TIMEOUT_MS) : undefined,
-      body: JSON.stringify({ kind, ...(text !== undefined ? { text } : {}), ...steerContext }),
+      body: JSON.stringify({
+        kind,
+        ...(text !== undefined ? { text } : {}),
+        ...steerContext,
+        ...(queuedRunId ? { queuedRunId } : {}),
+      }),
     });
     return { ok: true };
   } catch (err) {
@@ -842,52 +849,6 @@ export async function signalLiveRun(
     }
     throw err;
   }
-}
-
-const STEER_VERIFY_DELAYS_MS = [1200, 2200, 3600];
-const STEER_VERIFY_SKEW_MS = 120_000;
-
-export async function latestTranscriptSeq(sessionId: string): Promise<number | undefined> {
-  const page = await fetchTranscript(sessionId, { tailTurns: 1 });
-  const seqs = (page.entries ?? []).flatMap((e) => (e.seq === undefined ? [] : [e.seq]));
-  return seqs.length ? Math.max(...seqs) : undefined;
-}
-
-function steerTextMatches(stored: string, wanted: string): boolean {
-  return stored === wanted || stored.endsWith(`: ${wanted}`);
-}
-
-export async function verifySteerDelivered(
-  sessionId: string | null,
-  text: string,
-  sentAt: number,
-  delays: readonly number[] = STEER_VERIFY_DELAYS_MS,
-  sinceSeq?: number,
-): Promise<boolean> {
-  if (!sessionId) return false;
-  const wanted = text.trim();
-  if (!wanted) return false;
-  for (const delay of delays) {
-    await sleep(delay);
-    try {
-      const page = await fetchTranscript(sessionId, { tailTurns: 3 });
-      const found = (page.entries ?? []).some((e) => {
-        if (e.type !== "user") return false;
-        if (sinceSeq !== undefined && !(e.seq !== undefined && e.seq > sinceSeq)) return false;
-        const p = e.payload as { text?: string; steered?: boolean } | null;
-        return (
-          p?.steered === true &&
-          typeof p.text === "string" &&
-          steerTextMatches(p.text.trim(), wanted) &&
-          e.createdAt >= sentAt - STEER_VERIFY_SKEW_MS
-        );
-      });
-      if (found) return true;
-    } catch (e) {
-      swallow("web-ui: verify steer delivery", e);
-    }
-  }
-  return false;
 }
 
 export function makeCoreStreamFn(
@@ -1173,6 +1134,14 @@ async function drive(
     });
 
     if (submit.runId) {
+      if (!opener) {
+        const userMessages = agent.state.messages.filter(
+          (message) =>
+            (message.role === "user" || message.role === "user-with-attachments") &&
+            !(message as { opener?: boolean }).opener,
+        );
+        captureMessage(submit.runId, userMessages.length === 1);
+      }
       const message = agent.state.messages.find((message) => idempotencyKey && sendKeyOf(message) === idempotencyKey);
       if (message) (message as unknown as HistoryUserMessage).runId = submit.runId;
       await followRun(stream, partial, submit.runId, signal, notify, undefined, slot, gen);
@@ -1883,7 +1852,7 @@ export function entriesToMessages(entries: SessionEntry[], model?: Model<Api>): 
       stopReason: stopped ? "aborted" : "stop",
       timestamp: at ?? pending[pending.length - 1]?.createdAt,
     };
-    if (pending.length) {
+    if (pending.length || (stopped && timing?.startedAt !== undefined)) {
       const boundary = pending.findLast(
         (entry) => typeof (entry.payload as { workStartedAt?: unknown } | null)?.workStartedAt === "number",
       )?.payload as { workStartedAt: number } | undefined;
@@ -2005,7 +1974,8 @@ export function entriesToMessages(entries: SessionEntry[], model?: Model<Api>): 
         ...(typeof payload?.workStartedAt === "number" ? { startedAt: payload.workStartedAt } : {}),
         ...(typeof payload?.workFinishedAt === "number" ? { finishedAt: payload.workFinishedAt } : {}),
       };
-      if (text || pending.length || heldPosts.size || payload?.stopped) {
+      const stopped = payload?.stopped === true || text.trim() === "(stopped)";
+      if (text || pending.length || heldPosts.size || stopped) {
         spillHeldPosts();
         if (posted && text) {
           pending.push({
@@ -2015,9 +1985,9 @@ export function entriesToMessages(entries: SessionEntry[], model?: Model<Api>): 
             payload: { text, demoted: true },
             createdAt: e.createdAt,
           });
-          flushWork("", e.createdAt, false, timing, payload?.stopped === true);
+          flushWork("", e.createdAt, false, timing, stopped);
         } else {
-          flushWork(text, e.createdAt, !posted, timing, payload?.stopped === true);
+          flushWork(text, e.createdAt, !posted, timing, stopped);
         }
       }
       posted = false;

@@ -209,7 +209,7 @@ export const FIRST_PARTY_SECRET_SPECS: readonly SecretSpec[] = [
     name: "SUPERSERVE_API_KEY",
     service: "core",
     required: { when: { kind: "sandbox-backend", backend: "superserve" } },
-    description: "Superserve API key for the agent-computer substrate (Firecracker microVM per scope).",
+    description: "API key for Superserve sandboxes.",
     generate: "create an API key in the Superserve console (https://console.superserve.ai/api-keys)",
   },
   {

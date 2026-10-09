@@ -35,6 +35,7 @@ docker exec "$postgres" pg_isready -U qm -d qm > /dev/null
 signing_jwk="$(docker run --rm --entrypoint node "$image" -e "const {generateKeyPairSync}=require('node:crypto');process.stdout.write(JSON.stringify(generateKeyPairSync('ec',{namedCurve:'P-256'}).privateKey.export({format:'jwk'})))")"
 
 docker run -d --name "$container" --network "$network" -p 127.0.0.1::8080 \
+  --read-only --cap-drop ALL --user 10001:10001 \
   -e ORG_ID=smoke-tenant \
   -e PUBLIC_WEB_URL=https://tenant.example.com \
   -e PORTAL_PUBLIC_URL=https://tenant.example.com \
@@ -63,6 +64,7 @@ port="$(docker port "$container" 8080/tcp | head -1 | sed 's/.*://')"
 
 for _ in {1..120}; do
   if curl -fs "http://127.0.0.1:$port/healthz" > /dev/null; then
+    docker exec "$container" sh -c 'touch /data/.smoke /tmp/.smoke'
     docker exec "$container" node -e "fetch('http://127.0.0.1:8081/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
     docker exec "$container" node -e "fetch('http://127.0.0.1:8082/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
     docker exec "$container" node -e "fetch('http://127.0.0.1:8082/admin/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

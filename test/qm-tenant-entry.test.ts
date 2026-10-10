@@ -209,6 +209,7 @@ test("tenant surfaces receive reporting configuration without core credentials",
         QM_WEB_UI_PORT: ports[2]!,
         AUTH_EMBEDDED: "0",
         SUPERSERVE_API_KEY: "test-core-only",
+        ADMIN_GRANTS: "admin@example.com:org_admin",
         SENTRY_AUTH_TOKEN: "test-build-only",
       },
       join(root, "scripts/qm-tenant-entry.mjs"),
@@ -228,12 +229,14 @@ test("tenant surfaces receive reporting configuration without core credentials",
       assert.ok(env, stdout + stderr);
       for (const key of ["SENTRY_DSN", "SENTRY_ENVIRONMENT", "SENTRY_DEPLOYMENT", "SENTRY_RELEASE"])
         assert.equal(env[key], reporting[key as keyof typeof reporting]);
-      for (const key of ["SUPERSERVE_API_KEY", "DATABASE_URL", "SENTRY_AUTH_TOKEN"]) assert.equal(env[key], undefined);
+      for (const key of ["SUPERSERVE_API_KEY", "DATABASE_URL", "SENTRY_AUTH_TOKEN", "ADMIN_GRANTS"])
+        assert.equal(env[key], undefined);
     }
     assert.equal(environments.web.POSTHOG_API_KEY, reporting.POSTHOG_API_KEY);
     assert.equal(environments.web.POSTHOG_HOST, reporting.POSTHOG_HOST);
     assert.equal(environments.portal.POSTHOG_API_KEY, undefined);
     assert.equal(environments.core.SUPERSERVE_API_KEY, "test-core-only");
+    assert.equal(environments.core.ADMIN_GRANTS, "admin@example.com:org_admin");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

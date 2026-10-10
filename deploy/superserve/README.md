@@ -33,7 +33,7 @@ Core and web-ui do not read a bind address from their environment (`server.liste
 
 Values are read from the container environment. The supervisor derives the loopback wiring and the embedded-broker OIDC settings itself and only fills a derived value when the variable is not already set, so a provisioner can override any of them. Secret names come from `cli/src/secrets.ts` and `src/deployment/secret-schema.ts`; runtime behaviour from `src/config.ts`, `plugins/portal/src/index.ts`, `plugins/web-ui/server/index.ts` and `plugins/auth/src/config.ts`.
 
-Web-ui and portal receive an allowlisted subset of the environment (their own `WEB_UI_*`/`ADMIN_*`/`PORTAL_*`/`OIDC_*`/`AUTH_*`/`SMTP_*` variables, the two shared signing secrets, and process basics such as `PATH`, `HOME`, `NODE_ENV`, proxy settings). The reporting settings `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, `SENTRY_DEPLOYMENT`, and `SENTRY_RELEASE` reach all services; `POSTHOG_API_KEY` and `POSTHOG_HOST` reach core and web-ui. Model keys, `DATABASE_URL`, sandbox tokens and build credentials such as `SENTRY_AUTH_TOKEN` stay out of the surface processes.
+Web-ui and portal receive an allowlisted subset of the environment (their own `WEB_UI_*`/`PORTAL_*`/`OIDC_*`/`AUTH_*`/`SMTP_*` variables, the two shared signing secrets, and process basics such as `PATH`, `HOME`, `NODE_ENV`, proxy settings). The supervisor sets the admin mount itself, so `ADMIN_GRANTS` stays with core. The reporting settings `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, `SENTRY_DEPLOYMENT`, and `SENTRY_RELEASE` reach all services; `POSTHOG_API_KEY` and `POSTHOG_HOST` reach core and web-ui. Model keys, `DATABASE_URL`, sandbox tokens and build credentials such as `SENTRY_AUTH_TOKEN` stay out of the surface processes.
 
 ### Supervisor
 

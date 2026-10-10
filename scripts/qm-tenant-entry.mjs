@@ -69,7 +69,7 @@ const WEB_UI_PASSTHROUGH = {
     "POSTHOG_API_KEY",
     "POSTHOG_HOST",
   ],
-  prefixes: ["WEB_UI_", "ADMIN_"],
+  prefixes: ["WEB_UI_"],
 };
 const PORTAL_PASSTHROUGH = {
   names: [...COMMON_PASSTHROUGH, "RESEND_API_KEY", "USER"],

@@ -408,6 +408,21 @@ test("a scope routed to superserve requires its API key even when it is not the 
   assert.equal(secretByName(config, "SUPERSERVE_API_KEY").required, true);
 });
 
+test("superserve credential follows the SUPERSERVE_AUTH selector", () => {
+  const key = makeConfig({ env: { core: { SANDBOX_BACKEND: "superserve" } } });
+  assert.equal(secretByName(key, "SUPERSERVE_API_KEY").required, true);
+  assert.equal(
+    computedSecrets(key).some((secret) => secret.name === "SUPERSERVE_MACHINE_CREDENTIAL"),
+    false,
+  );
+  const machine = makeConfig({ env: { core: { SANDBOX_BACKEND: "superserve", SUPERSERVE_AUTH: "machine" } } });
+  assert.equal(secretByName(machine, "SUPERSERVE_MACHINE_CREDENTIAL").required, true);
+  assert.equal(
+    computedSecrets(machine).some((secret) => secret.name === "SUPERSERVE_API_KEY"),
+    false,
+  );
+});
+
 test("shared Fly publishing requires private peers only when selected", () => {
   for (const provider of ["fly", "aws"]) {
     for (const shared of [false, true]) {

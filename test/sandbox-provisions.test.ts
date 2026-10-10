@@ -188,6 +188,19 @@ test("explicit machine mode preserves ordinary keys and requires complete durabl
   assert.throws(() => loadConfig({ ...machine, SUPERSERVE_API_KEY: "ordinary-key" }), /cannot be combined/);
   assert.throws(() => loadConfig({ ...machine, SUPERSERVE_BASE_URL: undefined }), /explicit HTTPS/);
   assert.throws(
+    () => loadConfig({ ...machine, SUPERSERVE_BASE_URL: "https://api.superserve.ai/v1" }),
+    /explicit HTTPS/,
+  );
+  assert.equal(
+    loadConfig({ ...machine, SUPERSERVE_AUTH: "machine" }).superserveSandbox.machineCredential,
+    machine.SUPERSERVE_MACHINE_CREDENTIAL,
+  );
+  assert.throws(() => loadConfig({ ...machine, SUPERSERVE_AUTH: "key" }), /must be machine/);
+  assert.throws(
+    () => loadConfig({ ...machine, SUPERSERVE_AUTH: "machine", SUPERSERVE_MACHINE_CREDENTIAL: undefined }),
+    /requires SUPERSERVE_MACHINE_CREDENTIAL/,
+  );
+  assert.throws(
     () => loadConfig({ ...machine, SUPERSERVE_SANDBOX_HOST: undefined }),
     /require SUPERSERVE_SANDBOX_HOST/,
   );

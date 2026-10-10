@@ -213,7 +213,7 @@ export const FIRST_PARTY_SECRET_SPECS: readonly SecretSpec[] = [
         kind: "all",
         conditions: [
           { kind: "sandbox-backend", backend: "superserve" },
-          { kind: "env-absent", service: "core", name: "SUPERSERVE_MACHINE_CREDENTIAL" },
+          { kind: "env-absent", service: "core", name: "SUPERSERVE_AUTH" },
         ],
       },
     },
@@ -228,12 +228,11 @@ export const FIRST_PARTY_SECRET_SPECS: readonly SecretSpec[] = [
         kind: "all",
         conditions: [
           { kind: "sandbox-backend", backend: "superserve" },
-          { kind: "env-present", service: "core", name: "SUPERSERVE_MACHINE_CREDENTIAL" },
+          { kind: "env-equals", service: "core", name: "SUPERSERVE_AUTH", value: "machine" },
         ],
       },
-      optionalOtherwise: true,
     },
-    description: "Explicit tenant machine credential for Superserve sandboxes; requires an HTTPS base URL.",
+    description: "Tenant machine credential for Superserve sandboxes, selected by env.core.SUPERSERVE_AUTH=machine.",
   },
   {
     name: "DATABASE_URL",

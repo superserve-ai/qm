@@ -1095,6 +1095,10 @@ function modelProviderEnvStrict(env: NodeJS.ProcessEnv): ModelProvider | undefin
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const sandboxIdentity = verifiedSandboxIdentity(env);
+  if (env.SUPERSERVE_AUTH !== undefined && env.SUPERSERVE_AUTH !== "machine")
+    throw new Error("SUPERSERVE_AUTH must be machine when set");
+  if (env.SUPERSERVE_AUTH === "machine" && env.SUPERSERVE_MACHINE_CREDENTIAL === undefined)
+    throw new Error("SUPERSERVE_AUTH=machine requires SUPERSERVE_MACHINE_CREDENTIAL");
   if (env.SUPERSERVE_MACHINE_CREDENTIAL !== undefined) {
     if (!env.SUPERSERVE_MACHINE_CREDENTIAL.trim() || env.SUPERSERVE_API_KEY !== undefined)
       throw new Error("SUPERSERVE_MACHINE_CREDENTIAL must be nonempty and cannot be combined with SUPERSERVE_API_KEY");
@@ -1104,7 +1108,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     } catch {
       throw new Error("Machine sandbox credentials require an explicit HTTPS SUPERSERVE_BASE_URL");
     }
-    if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || endpoint.search || endpoint.hash)
+    if (
+      endpoint.protocol !== "https:" ||
+      endpoint.username ||
+      endpoint.password ||
+      endpoint.pathname !== "/" ||
+      endpoint.search ||
+      endpoint.hash
+    )
       throw new Error("Machine sandbox credentials require an explicit HTTPS SUPERSERVE_BASE_URL");
     const knownOrigin = [
       "https://api.superserve.ai",

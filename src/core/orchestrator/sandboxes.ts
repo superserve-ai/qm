@@ -397,7 +397,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
         throw new Error("sandbox does not belong to this conversation's writable scope");
       const handle = await deps.sandbox.provision(resolution.layers, {
         sandboxId: id,
-        ...(provisioning ? { provisioning } : {}),
+        ...(provisioning ? { provisioning, provisioningScopeId: scopeId } : {}),
         env: connectorEnv,
         egress: resolution.egress,
         ...(egressTokenForTurn ? { egressToken: egressTokenForTurn } : {}),
@@ -428,7 +428,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
         scratch: { key: memoryScopeId },
         routeScopeId: memoryScopeId,
         ...(onSandboxStatus ? { onStatus: onSandboxStatus } : {}),
-        ...(provisioning ? { provisioning } : {}),
+        ...(provisioning ? { provisioning, provisioningScopeId: scopeId } : {}),
       },
     );
     scratchBox.provisionMs = Date.now() - provisionStart;
@@ -458,7 +458,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
               scratch: { key: `owner-auth:${session.id}:${transferId}` },
               routeScopeId: memoryScopeId,
               ...(onSandboxStatus ? { onStatus: onSandboxStatus } : {}),
-              ...(provisioning ? { provisioning } : {}),
+              ...(provisioning ? { provisioning, provisioningScopeId: scopeId } : {}),
             },
           );
           ownerAuthBox.pending = handle;
@@ -542,7 +542,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
         egress: resolution.egress,
         ...(egressTokenForTurn ? { egressToken: egressTokenForTurn } : {}),
         ...(onSandboxStatus ? { onStatus: onSandboxStatus } : {}),
-        ...(provisioning ? { provisioning } : {}),
+        ...(provisioning ? { provisioning, provisioningScopeId: scopeId } : {}),
       },
     );
     reachBoxes.set(target, handle);

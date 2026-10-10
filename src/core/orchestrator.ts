@@ -2404,7 +2404,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                       egress: resolution.egress,
                       ...(egressTokenForTurn ? { egressToken: egressTokenForTurn } : {}),
                       scratch: { key: `credential-exec:${session.id}:${randomUUID()}` },
-                      ...(deps.sandboxProvisioning ? { provisioning: deps.sandboxProvisioning(input) } : {}),
+                      ...(deps.sandboxProvisioning
+                        ? { provisioning: deps.sandboxProvisioning(input), provisioningScopeId: scopeId }
+                        : {}),
                       routeScopeId: memoryScopeId,
                     },
                   );

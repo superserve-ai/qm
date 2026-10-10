@@ -1925,7 +1925,7 @@ function unchangedWebRouting(
         definition,
       ]).taskDefinition;
       const next = desired.find((item) => item.service === workload)!.task;
-      const keys = workload === "portal" ? ["WEB_UI_UPSTREAM", "ADMIN_UPSTREAM"] : ["ADMIN_ENABLED"];
+      const keys = workload === "portal" ? ["WEB_UI_UPSTREAM", "ADMIN_UPSTREAM", "ADMIN_ENABLED"] : ["ADMIN_ENABLED"];
       const settings = (task: Record<string, unknown> | undefined): string[] | undefined => {
         const containers = task?.containerDefinitions as Array<Record<string, unknown>> | undefined;
         const matches = containers?.filter((container) => container.name === workload);

@@ -87,6 +87,7 @@ else if (a[0] === "secrets" && a[1] === "list") {
       "PORTAL_IDENTITY_SECRET",
       "SECURITY_SCREEN_PROXY_TOKEN",
       "SKILL_SIGNING_SECRET",
+      "SUPERSERVE_MACHINE_CREDENTIAL",
     ]
       .map((name) => `${name} digest`)
       .join("\n"),
@@ -127,6 +128,7 @@ else console.log("ok");
     const calls = readFileSync(log, "utf8");
     assert.match(calls, /storage create --name acme-data --app acme-core --org personal --yes/);
     assert.match(calls, /secrets unset --stage -a acme-core SECURITY_SCREEN_PROXY_TOKEN/);
+    assert.match(calls, /secrets unset --stage -a acme-core SUPERSERVE_MACHINE_CREDENTIAL/);
     assert.ok(calls.indexOf("secrets unset") < calls.indexOf("deploy"));
     assert.ok(calls.indexOf("storage create") < calls.indexOf("deploy"));
     assert.equal(

@@ -1106,6 +1106,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     }
     if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password || endpoint.search || endpoint.hash)
       throw new Error("Machine sandbox credentials require an explicit HTTPS SUPERSERVE_BASE_URL");
+    const knownOrigin = [
+      "https://api.superserve.ai",
+      "https://api-usw.superserve.ai",
+      "https://api-staging.superserve.ai",
+    ].includes(endpoint.origin);
+    if (env.SUPERSERVE_SANDBOX_HOST === undefined ? !knownOrigin : !env.SUPERSERVE_SANDBOX_HOST.trim())
+      throw new Error("Machine sandbox credentials on a custom SUPERSERVE_BASE_URL require SUPERSERVE_SANDBOX_HOST");
   }
   if (sandboxIdentity && !env.SUPERSERVE_MACHINE_CREDENTIAL?.trim())
     throw new Error("Verified sandbox identity requires SUPERSERVE_MACHINE_CREDENTIAL");

@@ -175,7 +175,8 @@ test("explicit machine mode preserves ordinary keys and requires complete durabl
   const machine = {
     SANDBOX_BACKEND: "superserve",
     SUPERSERVE_MACHINE_CREDENTIAL: "synthetic-machine-root",
-    SUPERSERVE_BASE_URL: "https://sandbox.example.test",
+    SUPERSERVE_BASE_URL: "https://api.example.test",
+    SUPERSERVE_SANDBOX_HOST: "sandbox.example.test",
     SUPERSERVE_TEMPLATE: "qm-agent-fixture",
   };
   assert.equal(loadConfig(machine).superserveSandbox.machineCredential, machine.SUPERSERVE_MACHINE_CREDENTIAL);
@@ -186,6 +187,16 @@ test("explicit machine mode preserves ordinary keys and requires complete durabl
   );
   assert.throws(() => loadConfig({ ...machine, SUPERSERVE_API_KEY: "ordinary-key" }), /cannot be combined/);
   assert.throws(() => loadConfig({ ...machine, SUPERSERVE_BASE_URL: undefined }), /explicit HTTPS/);
+  assert.throws(
+    () => loadConfig({ ...machine, SUPERSERVE_SANDBOX_HOST: undefined }),
+    /require SUPERSERVE_SANDBOX_HOST/,
+  );
+  assert.throws(() => loadConfig({ ...machine, SUPERSERVE_SANDBOX_HOST: " " }), /require SUPERSERVE_SANDBOX_HOST/);
+  assert.equal(
+    loadConfig({ ...machine, SUPERSERVE_BASE_URL: "https://api-usw.superserve.ai", SUPERSERVE_SANDBOX_HOST: undefined })
+      .superserveSandbox.sandboxHost,
+    undefined,
+  );
   assert.throws(() => loadConfig({ ...machine, QM_VERIFIED_TENANT_ID: identity.tenantId }), /Complete verified/);
   const provenance = {
     QM_VERIFIED_TENANT_ID: identity.tenantId,

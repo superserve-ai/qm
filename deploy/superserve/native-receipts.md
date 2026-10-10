@@ -64,5 +64,8 @@ sandbox listings, names, timestamps, or display IDs. The field is absent for leg
 runs without receipts. No credential, lease token, or raw provider response is exposed.
 
 Maintenance can reconnect an existing sandbox without a run receipt, but cannot
-create or destructively replace it. A run's concurrent provisioning operations wait
+create or destructively replace it. With a verified identity this also refuses
+Superserve creations that have no originating run: swarm workers and computers an
+operator creates or migrates through the admin API. Those paths stay unavailable on
+verified tenants until they can carry receipts of their own. A run's concurrent provisioning operations wait
 in process; durable receipt and lease checks remain authoritative across workers.

@@ -171,7 +171,10 @@ export function createSandboxRouter(opts: RoutingSandboxOptions): Sandbox {
           layer.mode === "rw" ? { ...layer, scopeId: resource.backingScopeId } : layer,
         );
         const handle = await opts.resources!.use(resource.id, () =>
-          sandbox.provision(routedLayers, { ...provOpts, provisioningScopeId: resource.ownerScopeId }),
+          sandbox.provision(routedLayers, {
+            ...provOpts,
+            provisioningScopeId: provOpts?.provisioningScopeId ?? resource.ownerScopeId,
+          }),
         );
         return { ...handle, backend: resource.backend, scopeId: resource.ownerScopeId, resourceId: resource.id };
       }

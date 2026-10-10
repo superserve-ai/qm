@@ -75,6 +75,23 @@ describe("user-scoped routes require a portal-verified actor when enforcement is
     });
     const claimed = await built.runs.claimById(run.id, "identity-gate-worker", 60_000);
     assert.ok(claimed?.leaseToken);
+    const leaseToken = claimed.leaseToken;
+    const receipt = await built.runs.sandboxProvisions!.begin(run.id, leaseToken, {
+      tenantId: "tenant-fixture",
+      teamId: "team-fixture",
+      machinePrincipalId: "machine-fixture",
+      manifestId: "manifest-fixture",
+      releaseImage: "image-fixture",
+      scopeId: "personal:internal:U1",
+      backingScopeId: "personal:resource-fixture",
+    });
+    await built.runs.sandboxProvisions!.confirm(
+      run.id,
+      leaseToken,
+      receipt.receiptId,
+      "created",
+      "usw-exact-provider-id",
+    );
     await built.runs.complete(run.id, claimed.leaseToken, { status: "ok", reply: "owner-only result" });
     const strictServer = createServer(built.app, {
       signingSecret: SOURCE,
@@ -84,8 +101,8 @@ describe("user-scoped routes require a portal-verified actor when enforcement is
     });
     await new Promise<void>((resolve) => strictServer.listen(0, "127.0.0.1", resolve));
     const strictBase = `http://127.0.0.1:${(strictServer.address() as AddressInfo).port}`;
-    const read = (identity?: string) => {
-      const path = `/v1/runs/${run.id}/events?nonce=${crypto.randomUUID()}`;
+    const read = (identity?: string, stream = true) => {
+      const path = `/v1/runs/${run.id}${stream ? "/events" : ""}?nonce=${crypto.randomUUID()}`;
       return fetch(`${strictBase}${path}`, {
         headers: {
           ...signedHeaders(SOURCE, "GET", path, ""),
@@ -104,6 +121,23 @@ describe("user-scoped routes require a portal-verified actor when enforcement is
       const body = await response.text();
       assert.match(body, /owner-only result/);
       assert.match(body, /RUN_FINISHED/);
+      const snapshot = body
+        .split("\n")
+        .filter((line) => line.startsWith("data: "))
+        .map((line) => JSON.parse(line.slice(6)))
+        .find((event) => event.name === "run").value;
+      assert.equal(snapshot.sandboxProvisioning.version, 1);
+      assert.equal(snapshot.sandboxProvisioning.receipts[0].receiptId, receipt.receiptId);
+      assert.equal(snapshot.sandboxProvisioning.receipts[0].providerSandboxId, "usw-exact-provider-id");
+      assert.equal(snapshot.sandboxProvisioning.receipts[0].outcome, "created");
+      assert.ok(!body.includes(leaseToken));
+      const repeated = await read(await token(actor.id), false);
+      assert.equal(repeated.status, 200);
+      assert.deepEqual(
+        ((await repeated.json()) as { sandboxProvisioning: unknown }).sandboxProvisioning,
+        snapshot.sandboxProvisioning,
+      );
+      assert.equal((await read(await token("internal:U2"), false)).status, 404);
     } finally {
       strictServer.closeAllConnections();
       await new Promise<void>((resolve) => strictServer.close(() => resolve()));

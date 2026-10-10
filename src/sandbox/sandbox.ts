@@ -1,3 +1,4 @@
+import type { SandboxProvisioning } from "./provisioning-evidence.ts";
 import type { EgressPolicy, WorkspaceLayer } from "../types.ts";
 
 export interface SandboxHandle {
@@ -63,6 +64,8 @@ export function visibleTools(tools: readonly string[]): string[] {
 }
 
 export interface ProvisionOptions {
+  provisioning?: SandboxProvisioning;
+  provisioningScopeId?: string;
   sandboxId?: string;
   env?: Record<string, string>;
   egress?: EgressPolicy;

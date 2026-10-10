@@ -1,3 +1,4 @@
+import type { SandboxProvisioning } from "../../sandbox/provisioning-evidence.ts";
 import type { RuntimeService } from "../../harness/runtime-types.ts";
 import type { SandboxResources } from "../../sandbox/sandbox-resources.ts";
 import type { AwsRoleBroker } from "../../auth/aws-role-broker.ts";
@@ -124,6 +125,7 @@ export interface OrchestratorDeps {
   workspace: WorkspaceStore;
   files: FileArtifactStore;
   sandbox: Sandbox;
+  sandboxProvisioning?: (input: Pick<OrchestratorInput, "runId" | "runLeaseToken" | "attempt">) => SandboxProvisioning;
   sandboxMigration?: SandboxMigrationRunner;
   sandboxResources?: SandboxResources;
   modelGateway: ModelGateway;

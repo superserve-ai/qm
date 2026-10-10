@@ -208,9 +208,32 @@ export const FIRST_PARTY_SECRET_SPECS: readonly SecretSpec[] = [
   {
     name: "SUPERSERVE_API_KEY",
     service: "core",
-    required: { when: { kind: "sandbox-backend", backend: "superserve" } },
+    required: {
+      when: {
+        kind: "all",
+        conditions: [
+          { kind: "sandbox-backend", backend: "superserve" },
+          { kind: "env-absent", service: "core", name: "SUPERSERVE_MACHINE_CREDENTIAL" },
+        ],
+      },
+    },
     description: "API key for Superserve sandboxes.",
     generate: "create an API key in the Superserve console (https://console.superserve.ai/api-keys)",
+  },
+  {
+    name: "SUPERSERVE_MACHINE_CREDENTIAL",
+    service: "core",
+    required: {
+      when: {
+        kind: "all",
+        conditions: [
+          { kind: "sandbox-backend", backend: "superserve" },
+          { kind: "env-present", service: "core", name: "SUPERSERVE_MACHINE_CREDENTIAL" },
+        ],
+      },
+      optionalOtherwise: true,
+    },
+    description: "Explicit tenant machine credential for Superserve sandboxes; requires an HTTPS base URL.",
   },
   {
     name: "DATABASE_URL",

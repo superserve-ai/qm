@@ -58,6 +58,7 @@ export interface SandboxResources {
     backend: string,
     name?: string,
     reservationId?: string,
+    provisioning?: ProvisionOptions["provisioning"],
   ): Promise<SandboxResource>;
   access(actorId: string, id: string): Promise<SandboxResource>;
   status(actorId: string, id: string): Promise<ComputerStatus>;
@@ -304,7 +305,7 @@ export function createSandboxResources(opts: {
         providers,
       };
     },
-    async create(actorId, scopeId, backend, name, reservationId) {
+    async create(actorId, scopeId, backend, name, reservationId, provisioning) {
       await requireEnabled();
       await authorize(actorId, scopeId);
       if (!Object.hasOwn(opts.backends, backend) || !opts.backends[backend as SandboxBackendName])
@@ -333,10 +334,11 @@ export function createSandboxResources(opts: {
         await opts.records.put(id, record);
         const sandbox = opts.backends[record.backend]!;
         try {
-          const handle = await sandbox.provision(
-            [{ scopeId: record.backingScopeId, mountPath: "/", mode: "rw" }],
-            await opts.provisionOptions?.(scopeId),
-          );
+          const handle = await sandbox.provision([{ scopeId: record.backingScopeId, mountPath: "/", mode: "rw" }], {
+            ...(await opts.provisionOptions?.(scopeId)),
+            provisioningScopeId: scopeId,
+            ...(provisioning ? { provisioning } : {}),
+          });
           const ready: SandboxResource = {
             ...record,
             state: "ready",

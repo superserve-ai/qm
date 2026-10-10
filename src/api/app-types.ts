@@ -1,3 +1,4 @@
+import type { RunSandboxProvision } from "../runs/sandbox-provisions.ts";
 import type { AdmittedWork } from "../util/admitted-work.ts";
 import type { EventBus } from "../util/event-bus.ts";
 import type { RunStreamEvent } from "../runs/run-stream-events.ts";
@@ -276,6 +277,7 @@ export interface App {
     runId: string,
     viewer?: string,
   ): Promise<{
+    sandboxProvisioning?: { version: 1; receipts: RunSandboxProvision[] };
     status: Run["status"];
     result: TurnResult | null;
     input?: {

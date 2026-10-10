@@ -2303,6 +2303,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           sandbox: deps.sandbox,
           sandboxResources: deps.sandboxResources,
           ...(deps.sandboxMigration ? { sandboxMigration: deps.sandboxMigration, invalidateProvision } : {}),
+          ...(deps.sandboxProvisioning ? { sandboxProvisioning: deps.sandboxProvisioning(input) } : {}),
           provision,
           provisionScratch,
           provisionResource,
@@ -2403,6 +2404,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
                       egress: resolution.egress,
                       ...(egressTokenForTurn ? { egressToken: egressTokenForTurn } : {}),
                       scratch: { key: `credential-exec:${session.id}:${randomUUID()}` },
+                      ...(deps.sandboxProvisioning ? { provisioning: deps.sandboxProvisioning(input) } : {}),
                       routeScopeId: memoryScopeId,
                     },
                   );

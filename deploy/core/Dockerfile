@@ -18,6 +18,7 @@ COPY --from=wireproxy-build /out/wireproxy /usr/local/bin/wireproxy
 WORKDIR /app
 
 COPY package.json package-lock.json ./
+COPY deploy/superserve/vendor ./deploy/superserve/vendor
 COPY .husky/install.mjs .husky/install.mjs
 RUN npm ci --omit=dev && npm audit --omit=dev --audit-level=moderate \
   && rm -rf /root/.npm /tmp/node-compile-cache

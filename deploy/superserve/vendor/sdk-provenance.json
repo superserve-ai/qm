@@ -1,0 +1,28 @@
+{
+  "repository": "superserve-ai/superserve",
+  "base_tag": "@superserve/sdk@0.8.3",
+  "base_revision": "b0d2a30070a283db04e9922f9209d5fa896ef653",
+  "source_revision": "c24ad3635d6991fac5a15ae17e5b66e6e55c8986",
+  "package_name": "@superserve/sdk",
+  "package_version": "0.8.3",
+  "integrity": "sha512-gkNL87VxhJFe3YfniTY5esY0QzADIcw37zgK5QdEj8sdoWgVnor2Z2JCyeKcotA7XkVf8Cqxgw6ap4STlKrXBA==",
+  "sha256": "45d626777048f4477529cf3a8a0681b60b28b9598c4ab62191c85699afaf8a32",
+  "tests": {
+    "backport_suite": 253,
+    "current_suite": 348,
+    "typecheck": "PASS",
+    "lint": "PASS",
+    "format": "PASS",
+    "build_esm_cjs_declarations": "PASS",
+    "packed_esm_cjs_consumer": "PASS",
+    "packed_declaration_consumer": "PASS",
+    "custom_host_routing_and_invalid_suffixes": "PASS including packed ESM/CJS rejection of overlong suffix"
+  },
+  "reviews": {
+    "security": "PASS after DNS length fix",
+    "correctness": "PASS after unknown-origin fix",
+    "adversarial_regression": "PASS after DNS length fix"
+  },
+  "artifact": "superserve-sdk-c24ad3635d6991fac5a15ae17e5b66e6e55c8986.tgz",
+  "source_tree": "08903f7f3abcc52735b3d481a35dc32ac6b4b8c5"
+}

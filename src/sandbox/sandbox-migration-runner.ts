@@ -44,6 +44,7 @@ interface MigrateScopeOptions {
   copyTimeoutSec?: number;
   strategy?: "copy" | "snapshot";
   resumeBlobId?: string;
+  provisioning?: ProvisionOptions["provisioning"];
 }
 
 export interface SandboxMigrationRunner {
@@ -97,7 +98,10 @@ export function createSandboxMigrationRunner(opts: SandboxMigrationOptions): San
       if (!toSandbox.adoptHomeSnapshot)
         throw new Error(`snapshot migration needs ${to} to support adopting home snapshots`);
     }
-    const provOpts = (await opts.provisionOptions?.(scopeId)) ?? {};
+    const provOpts: ProvisionOptions = {
+      ...(await opts.provisionOptions?.(scopeId)),
+      ...(migrateOpts?.provisioning ? { provisioning: migrateOpts.provisioning } : {}),
+    };
     const fromHandle = await fromSandbox.provision(scopeLayers(scopeId), provOpts);
     const fromHome = fromHandle.homeDir ?? fromSandbox.profile.spec?.homeDir ?? "/root";
     const timeoutMs = (migrateOpts?.copyTimeoutSec ?? 900) * 1000;

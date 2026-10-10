@@ -1,3 +1,6 @@
+import { provisioningUnavailable } from "../runs/sandbox-provisions.ts";
+import type { SandboxProvisioning, SandboxProvisionScope } from "./provisioning-evidence.ts";
+import type { SuperserveCreateOptions } from "./superserve-client.ts";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import type { WorkspaceLayer } from "../types.ts";
@@ -105,6 +108,7 @@ export function createConfigEpochResolver(
 }
 
 export interface SuperserveSandboxOptions extends BlobStagingOptions {
+  requireProvisioningEvidence?: boolean;
   client: SuperserveClient;
   namePrefix?: string;
   defaultTimeoutSec?: number;
@@ -258,28 +262,36 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     scope: string,
     name: string,
     sandboxId: string,
+    evidence?: SandboxProvisioning,
   ): Promise<{ session: SuperserveSession; current: boolean }> {
     const info = await client.info(sandboxId, scopeFilter(name));
+    await evidence?.assertReady();
     const stampedEpoch = Number(info.metadata[SUPERSERVE_METADATA.epoch] ?? 0);
     if (stampedEpoch > (await configEpoch())) return { session: await client.connect(sandboxId), current: false };
     if (opts.template && info.metadata[SUPERSERVE_METADATA.template] !== opts.template) {
+      if (opts.requireProvisioningEvidence && !evidence) throw provisioningUnavailable();
+      await evidence?.assertReady();
       await client.kill(sandboxId);
       const message = `sandbox ${sandboxId} was built from template ${info.metadata[SUPERSERVE_METADATA.template] ?? "unknown"}, not ${opts.template}; it was destroyed and the next provision creates a replacement`;
       reportError("sandbox_template", "template_changed", message, scope);
       throw new SuperserveSandboxGoneError(sandboxId, message);
     }
     const stale = normalizedNetwork(info.network) !== appliedNetwork;
+    if (stale && opts.requireProvisioningEvidence && !evidence) throw provisioningUnavailable();
     const retire = async (): Promise<never> => {
+      await evidence?.assertReady();
       await client.kill(sandboxId);
       const message = `sandbox ${sandboxId} was paused under a different egress policy; it was destroyed and the next provision creates a replacement`;
       reportError("sandbox_egress", "policy_changed", message, scope);
       throw new SuperserveSandboxGoneError(sandboxId, message);
     };
     try {
+      const metadata = { ...info.metadata, ...(await scopeMetadata(info.name)) };
+      await evidence?.assertReady();
       await client.update(sandboxId, {
         timeoutSeconds: Math.max(info.timeoutSeconds ?? 0, idlePauseSec),
         autoDeleteSeconds: retentionSec,
-        metadata: { ...info.metadata, ...(await scopeMetadata(info.name)) },
+        metadata,
         ...(stale ? { network: adoptedNetwork } : {}),
       });
     } catch (err) {
@@ -289,6 +301,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     if (stale && normalizedNetwork((await client.info(sandboxId, scopeFilter(name))).network) !== appliedNetwork) {
       await retire();
     }
+    await evidence?.assertReady();
     return { session: await client.connect(sandboxId), current: true };
   }
 
@@ -305,10 +318,41 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     return live;
   }
 
+  async function observedCreate(
+    createOptions: SuperserveCreateOptions,
+    binding: SandboxProvisionScope,
+    evidence?: SandboxProvisioning,
+  ): Promise<SuperserveSession> {
+    if (opts.requireProvisioningEvidence && !evidence) throw provisioningUnavailable();
+    const receipt = await evidence?.beginCreate(binding);
+    let session: SuperserveSession;
+    try {
+      session = await client.create(createOptions);
+    } catch (error) {
+      if (!receipt) throw error;
+      await receipt.uncertain().catch(() => undefined);
+      throw provisioningUnavailable();
+    }
+    if (receipt) {
+      try {
+        await receipt.created(session.id);
+      } catch {
+        throw provisioningUnavailable();
+      }
+    }
+    return session;
+  }
+
   async function ensureLive(
     scope: string,
     name: string,
     onStatus?: (text: string) => void,
+    evidence?: SandboxProvisioning,
+    binding: SandboxProvisionScope = {
+      scopeId: scope,
+      backingScopeId: scope,
+      ...(opts.template ? { template: opts.template } : {}),
+    },
   ): Promise<{ live: Live; coldStart: boolean }> {
     const cached = liveByName.get(name);
     if (cached) {
@@ -316,6 +360,7 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         const info = await client.info(cached.session.id, scopeFilter(name));
         if (normalizedNetwork(info.network) === appliedNetwork) {
           cached.current = Number(info.metadata[SUPERSERVE_METADATA.epoch] ?? 0) <= (await configEpoch());
+          await evidence?.reused(binding, cached.session.id, "cached");
           return { live: cached, coldStart: false };
         }
         dropLive(name, cached.session.id);
@@ -329,7 +374,8 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     const stored = await store.get(scope);
     if (stored) {
       try {
-        const { session, current } = await reconnect(scope, name, stored.sandboxId);
+        const { session, current } = await reconnect(scope, name, stored.sandboxId, evidence);
+        await evidence?.reused(binding, session.id, "stored");
         const live = await adopt(name, session, { scope, known: stored }, current);
         return { live, coldStart: false };
       } catch (err) {
@@ -341,7 +387,8 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     const listed = await client.list({ [SUPERSERVE_METADATA.scope]: name });
     for (const summary of listed) {
       try {
-        const { session, current } = await reconnect(scope, name, summary.id);
+        const { session, current } = await reconnect(scope, name, summary.id, evidence);
+        await evidence?.reused(binding, session.id, "adopted");
         const live = await adopt(name, session, { scope }, current);
         return { live, coldStart: false };
       } catch (err) {
@@ -354,31 +401,47 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
     } catch (error) {
       void error;
     }
-    const session = await client.create({
-      name,
-      metadata: await scopeMetadata(name),
-      ...(opts.template ? { template: opts.template } : {}),
-      timeoutSeconds: idlePauseSec,
-      autoDeleteSeconds: retentionSec,
-      ...(network ? { network } : {}),
-    });
+    const session = await observedCreate(
+      {
+        name,
+        metadata: await scopeMetadata(name),
+        ...(opts.template ? { template: opts.template } : {}),
+        timeoutSeconds: idlePauseSec,
+        autoDeleteSeconds: retentionSec,
+        ...(network ? { network } : {}),
+      },
+      binding,
+      evidence,
+    );
     const live = await adopt(name, session, { scope });
     return { live, coldStart: true };
   }
 
-  async function createScratch(name: string): Promise<Live> {
-    const session = await client.create({
-      name,
-      metadata: { ...(await scopeMetadata(name)), [SUPERSERVE_METADATA.kind]: "scratch" },
-      ...(opts.template ? { template: opts.template } : {}),
-      timeoutSeconds: SCRATCH_IDLE_PAUSE_SEC,
-      autoDeleteSeconds: SCRATCH_RETENTION_SEC,
-      ...(network ? { network } : {}),
-    });
+  async function createScratch(
+    name: string,
+    binding: SandboxProvisionScope,
+    evidence?: SandboxProvisioning,
+  ): Promise<Live> {
+    const session = await observedCreate(
+      {
+        name,
+        metadata: { ...(await scopeMetadata(name)), [SUPERSERVE_METADATA.kind]: "scratch" },
+        ...(opts.template ? { template: opts.template } : {}),
+        timeoutSeconds: SCRATCH_IDLE_PAUSE_SEC,
+        autoDeleteSeconds: SCRATCH_RETENTION_SEC,
+        ...(network ? { network } : {}),
+      },
+      binding,
+      evidence,
+    );
     return adopt(name, session);
   }
 
-  async function ensureScratch(key: string): Promise<{ name: string; coldStart: boolean }> {
+  async function ensureScratch(
+    key: string,
+    binding: SandboxProvisionScope,
+    evidence?: SandboxProvisioning,
+  ): Promise<{ name: string; coldStart: boolean }> {
     const name = sandboxScopeName(`${prefix}-scratch`, key);
     scratchKeyByName.set(name, key);
     const active = activeScratch.get(name) ?? 0;
@@ -387,6 +450,8 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       try {
         const info = await client.info(cached.session.id, scopeFilter(name));
         if (normalizedNetwork(info.network) !== appliedNetwork) {
+          if (opts.requireProvisioningEvidence && !evidence) throw provisioningUnavailable();
+          await evidence?.assertReady();
           await client.kill(cached.session.id);
           dropLive(name, cached.session.id);
           reportError(
@@ -401,7 +466,8 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
       }
     }
     const coldStart = !liveByName.has(name);
-    if (coldStart) await createScratch(name);
+    if (coldStart) await createScratch(name, binding, evidence);
+    else await evidence?.reused(binding, liveByName.get(name)!.session.id, "cached");
     activeScratch.set(name, active + 1);
     return { name, coldStart };
   }
@@ -562,16 +628,22 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
         const scratch = provOpts?.scratch;
         const writable = layers.find((l) => l.mode === "rw") ?? layers[0];
         const scope = writable?.scopeId ?? "default";
+        const binding: SandboxProvisionScope = {
+          scopeId: provOpts?.provisioningScopeId ?? provOpts?.routeScopeId ?? scope,
+          backingScopeId: scratch ? `scratch:${scratch.key}` : scope,
+          ...(opts.template ? { template: opts.template } : {}),
+        };
         let pendingHandle: SandboxHandle | undefined;
         const provisionAndPrepare = async (): Promise<SandboxHandle> => {
+          await provOpts?.provisioning?.assertReady();
           let name: string;
           let coldStart: boolean;
           if (scratch) {
-            ({ name, coldStart } = await ensureScratch(scratch.key));
+            ({ name, coldStart } = await ensureScratch(scratch.key, binding, provOpts?.provisioning));
           } else {
             name = sandboxScopeName(prefix, scope);
             scopeByName.set(name, scope);
-            coldStart = (await ensureLive(scope, name, provOpts?.onStatus)).coldStart;
+            coldStart = (await ensureLive(scope, name, provOpts?.onStatus, provOpts?.provisioning, binding)).coldStart;
           }
           const homeDir = configuredHome;
           const workspaceDir = workspaceDirOf(homeDir);
@@ -589,9 +661,12 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
             ...(Object.keys(env).length ? { env } : {}),
           };
           pendingHandle = handle;
+          await provOpts?.provisioning?.assertReady();
           const prepare = async (): Promise<SandboxHandle> => {
             assertCurrent(handle);
-            if (!(await ownsGuest(name))) return handle;
+            const owned = await ownsGuest(name);
+            await provOpts?.provisioning?.assertReady();
+            if (!owned) return handle;
             const credLinks = scratch ? "" : ` && ${ephemeralCredLinkScript(homeDir, opts.credentialPaths ?? [])}`;
             const prep = await execRaw(name, `mkdir -p ${shq(workspaceDir)}${credLinks}`, PREP_TIMEOUT_SEC);
             if (prep.code !== 0)
@@ -602,32 +677,50 @@ export function createSuperserveSandbox(workspace: WorkspaceStore, opts: Superse
               handle,
               {
                 readFile: (h, rel) => sandbox.readFile(h, rel),
-                writeFileBytes: (h, rel, data) => sandbox.writeFileBytes(h, rel, data),
-                exec: (script, t) => execRaw(name, script, t),
+                writeFileBytes: async (h, rel, data) => {
+                  await provOpts?.provisioning?.assertReady();
+                  return sandbox.writeFileBytes(h, rel, data);
+                },
+                exec: async (script, t) => {
+                  await provOpts?.provisioning?.assertReady();
+                  return execRaw(name, script, t);
+                },
               },
               { manifest: RO_LAYERS_MANIFEST, tar: RO_LAYERS_TAR, label: "superserve" },
             );
             if (installLayerTools)
               await installLayerTools({
-                exec: (script, t) => execRaw(name, script, t),
-                writeAbs: (abs, data) => writeAbsBytes(name, abs, data),
+                exec: async (script, t) => {
+                  await provOpts?.provisioning?.assertReady();
+                  return execRaw(name, script, t);
+                },
+                writeAbs: async (abs, data) => {
+                  await provOpts?.provisioning?.assertReady();
+                  return writeAbsBytes(name, abs, data);
+                },
               });
             assertCurrent(handle);
+            await provOpts?.provisioning?.assertReady();
             return handle;
           };
           return providerSandboxId ? pinnedSandbox.run(providerSandboxId, prepare) : prepare();
         };
-        try {
-          return await (scratch
-            ? provisionQueue(`scratch:${scratch.key}`, provisionAndPrepare)
-            : provisionQueue(scope, () => advisoryLock.withLock(lockKey(scope), provisionAndPrepare)));
-        } catch (err) {
-          if (pendingHandle)
-            await sandbox
-              .teardown(pendingHandle)
-              .catch(swallowAs("superserve-sandbox: teardown after failed provision", undefined));
-          throw err;
-        }
+        const provisionWithCleanup = async () => {
+          try {
+            return await (scratch
+              ? provisionQueue(`scratch:${scratch.key}`, provisionAndPrepare)
+              : provisionQueue(scope, () => advisoryLock.withLock(lockKey(scope), provisionAndPrepare)));
+          } catch (err) {
+            if (pendingHandle)
+              await sandbox
+                .teardown(pendingHandle)
+                .catch(swallowAs("superserve-sandbox: teardown after failed provision", undefined));
+            throw err;
+          }
+        };
+        return provOpts?.provisioning
+          ? provOpts.provisioning.withProvision(provisionWithCleanup)
+          : provisionWithCleanup();
       });
     },
 

@@ -154,11 +154,15 @@ export async function resolveSandbox(opts: {
 
   if (backend === "superserve") {
     const apiKey = opts.baseEnv.SUPERSERVE_API_KEY?.trim();
+    const machineCredential = opts.baseEnv.SUPERSERVE_MACHINE_CREDENTIAL?.trim();
+    if (
+      opts.baseEnv.SUPERSERVE_MACHINE_CREDENTIAL !== undefined &&
+      (!machineCredential || opts.baseEnv.SUPERSERVE_API_KEY !== undefined)
+    )
+      throw new Error("SUPERSERVE_MACHINE_CREDENTIAL must be nonempty and cannot be combined with SUPERSERVE_API_KEY");
     const template = opts.baseEnv.SUPERSERVE_TEMPLATE?.trim();
-    if (!apiKey)
-      throw new Error(
-        "--sandbox superserve requires SUPERSERVE_API_KEY in the environment (create an API key in the Superserve console)",
-      );
+    if (!apiKey && !machineCredential)
+      throw new Error("--sandbox superserve requires SUPERSERVE_API_KEY or explicit SUPERSERVE_MACHINE_CREDENTIAL");
     if (!template)
       throw new Error(
         "--sandbox superserve requires SUPERSERVE_TEMPLATE in the environment (the ready qm-agent-<release> template that carries the agent toolchain)",
@@ -173,13 +177,14 @@ export async function resolveSandbox(opts: {
     }
     const env: Record<string, string> = {
       SANDBOX_BACKEND: "superserve",
-      SUPERSERVE_API_KEY: apiKey,
+      ...(machineCredential ? { SUPERSERVE_MACHINE_CREDENTIAL: machineCredential } : { SUPERSERVE_API_KEY: apiKey! }),
       SUPERSERVE_TEMPLATE: template,
       SUPERSERVE_NAME_PREFIX:
         opts.baseEnv.SUPERSERVE_NAME_PREFIX ||
         `qmdev-${createHash("sha1").update(opts.worktree).digest("hex").slice(0, 12)}`,
     };
     if (opts.baseEnv.SUPERSERVE_BASE_URL) env.SUPERSERVE_BASE_URL = opts.baseEnv.SUPERSERVE_BASE_URL;
+    if (opts.baseEnv.SUPERSERVE_SANDBOX_HOST) env.SUPERSERVE_SANDBOX_HOST = opts.baseEnv.SUPERSERVE_SANDBOX_HOST;
     if (opts.baseEnv.SUPERSERVE_EGRESS_ALLOW) env.SUPERSERVE_EGRESS_ALLOW = opts.baseEnv.SUPERSERVE_EGRESS_ALLOW;
     if (opts.baseEnv.SUPERSERVE_EGRESS_DENY) env.SUPERSERVE_EGRESS_DENY = opts.baseEnv.SUPERSERVE_EGRESS_DENY;
     if (!opts.baseEnv.SUPERSERVE_EGRESS_ALLOW && !opts.baseEnv.SUPERSERVE_EGRESS_DENY)

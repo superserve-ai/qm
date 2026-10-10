@@ -85,6 +85,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
     perf,
   } = ctx;
 
+  const provisioning = deps.sandboxProvisioning?.(input);
   let ownerAuthCommand: ((command: string) => string) | undefined;
   const brokerEnvKeys = [
     "AWS_ACCESS_KEY_ID",
@@ -276,11 +277,13 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
     const provisionStart = Date.now();
     const swarmBinding = await deps.swarms?.binding(input);
     const handle = await deps.sandbox.provision(resolution.layers, {
+      provisioningScopeId: scopeId,
       ...(swarmBinding?.sandboxId ? { sandboxId: swarmBinding.sandboxId } : {}),
       env: connectorEnv,
       egress: resolution.egress,
       ...(egressTokenForTurn ? { egressToken: egressTokenForTurn } : {}),
       ...(onSandboxStatus ? { onStatus: onSandboxStatus } : {}),
+      ...(provisioning ? { provisioning } : {}),
     });
     box.pending = handle;
     emit("provision", provisionStart, Date.now());
@@ -394,6 +397,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
         throw new Error("sandbox does not belong to this conversation's writable scope");
       const handle = await deps.sandbox.provision(resolution.layers, {
         sandboxId: id,
+        ...(provisioning ? { provisioning } : {}),
         env: connectorEnv,
         egress: resolution.egress,
         ...(egressTokenForTurn ? { egressToken: egressTokenForTurn } : {}),
@@ -424,6 +428,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
         scratch: { key: memoryScopeId },
         routeScopeId: memoryScopeId,
         ...(onSandboxStatus ? { onStatus: onSandboxStatus } : {}),
+        ...(provisioning ? { provisioning } : {}),
       },
     );
     scratchBox.provisionMs = Date.now() - provisionStart;
@@ -453,6 +458,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
               scratch: { key: `owner-auth:${session.id}:${transferId}` },
               routeScopeId: memoryScopeId,
               ...(onSandboxStatus ? { onStatus: onSandboxStatus } : {}),
+              ...(provisioning ? { provisioning } : {}),
             },
           );
           ownerAuthBox.pending = handle;
@@ -536,6 +542,7 @@ export function createTurnSandboxes(ctx: TurnSandboxContext) {
         egress: resolution.egress,
         ...(egressTokenForTurn ? { egressToken: egressTokenForTurn } : {}),
         ...(onSandboxStatus ? { onStatus: onSandboxStatus } : {}),
+        ...(provisioning ? { provisioning } : {}),
       },
     );
     reachBoxes.set(target, handle);

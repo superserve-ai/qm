@@ -78,7 +78,22 @@ test("migrateScope copies $HOME, flips the route only after a verified copy, and
     const { aws, sprites, routes } = build(root);
     writeFileSync(join(root, "aws-home", "notes.txt"), "hello\n");
     const runner = createSandboxMigrationRunner({ backends: { aws, sprites }, routes, defaultBackend: "aws" });
-    const res = await runner.migrateScope("personal:alice", "sprites", "canary");
+    const provisioning = {
+      withProvision: async <T>(action: () => Promise<T>) => action(),
+      assertReady: async () => undefined,
+      beginCreate: async () => {
+        throw new Error("unexpected create");
+      },
+      reused: async () => undefined,
+    };
+    for (const backend of [aws, sprites]) {
+      const provision = backend.provision.bind(backend);
+      backend.provision = async (layers, options) => {
+        assert.equal(options?.provisioning, provisioning);
+        return provision(layers, options);
+      };
+    }
+    const res = await runner.migrateScope("personal:alice", "sprites", "canary", { provisioning });
     assert.equal(res.from, "aws");
     assert.equal(res.to, "sprites");
     assert.match(res.sha, /^[0-9a-f]{64}$/);
@@ -89,7 +104,7 @@ test("migrateScope copies $HOME, flips the route only after a verified copy, and
     assert.equal(route?.reason, "canary");
     assert.equal(aws.tornDown, 1);
     assert.equal(sprites.tornDown, 1);
-    const back = await runner.migrateScope("personal:alice", "aws");
+    const back = await runner.migrateScope("personal:alice", "aws", undefined, { provisioning });
     assert.equal(back.from, "sprites");
     assert.equal((await routes.get("personal:alice"))?.backend, "aws");
   } finally {

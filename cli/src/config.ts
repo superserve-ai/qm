@@ -700,6 +700,9 @@ function validate(raw: unknown, path: string): QmConfig {
       `${path}: the superserve sandbox backend requires env.core.SUPERSERVE_TEMPLATE (the ready qm-agent-<release> template); core refuses to start without it`,
     );
   }
+  if (env.core?.SUPERSERVE_AUTH !== undefined && env.core.SUPERSERVE_AUTH !== "machine") {
+    throw new CliError(`${path}: env.core.SUPERSERVE_AUTH must be "machine" when set`);
+  }
 
   const out: QmConfig = {
     contract,

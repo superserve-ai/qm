@@ -1028,7 +1028,7 @@ function unsetDisabledFlyPublisherToken(config: QmConfig, appPrefix: string): vo
 
 function unsetInactiveSuperserveCredential(config: QmConfig, appPrefix: string): void {
   const inactive =
-    config.env.core?.SUPERSERVE_AUTH?.trim() === "machine" ? "SUPERSERVE_API_KEY" : "SUPERSERVE_MACHINE_CREDENTIAL";
+    config.env.core?.SUPERSERVE_AUTH === "machine" ? "SUPERSERVE_API_KEY" : "SUPERSERVE_MACHINE_CREDENTIAL";
   const app = `${appPrefix}-core`;
   if (!secretNames(app)?.has(inactive)) return;
   fly(["secrets", "unset", "--stage", "-a", app, inactive]);

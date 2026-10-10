@@ -853,7 +853,7 @@ test("run-owned resource creation forwards trusted provisioning evidence and log
       return provision(layers, options);
     };
   });
-  const created = await resources.create("alice", "personal:alice", "local", "fixture", undefined, provisioning);
+  const created = await resources.create("alice", "personal:alice", "local", "fixture", undefined, { provisioning });
   assert.equal(created.state, "ready");
 });
 

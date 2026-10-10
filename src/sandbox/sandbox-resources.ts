@@ -58,7 +58,7 @@ export interface SandboxResources {
     backend: string,
     name?: string,
     reservationId?: string,
-    provisioning?: ProvisionOptions["provisioning"],
+    provisioning?: Pick<ProvisionOptions, "provisioning" | "provisioningScopeId">,
   ): Promise<SandboxResource>;
   access(actorId: string, id: string): Promise<SandboxResource>;
   status(actorId: string, id: string): Promise<ComputerStatus>;
@@ -337,7 +337,7 @@ export function createSandboxResources(opts: {
           const handle = await sandbox.provision([{ scopeId: record.backingScopeId, mountPath: "/", mode: "rw" }], {
             ...(await opts.provisionOptions?.(scopeId)),
             provisioningScopeId: scopeId,
-            ...(provisioning ? { provisioning } : {}),
+            ...provisioning,
           });
           const ready: SandboxResource = {
             ...record,

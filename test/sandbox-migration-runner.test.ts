@@ -90,10 +90,13 @@ test("migrateScope copies $HOME, flips the route only after a verified copy, and
       const provision = backend.provision.bind(backend);
       backend.provision = async (layers, options) => {
         assert.equal(options?.provisioning, provisioning);
+        assert.equal(options?.provisioningScopeId, "personal:session");
         return provision(layers, options);
       };
     }
-    const res = await runner.migrateScope("personal:alice", "sprites", "canary", { provisioning });
+    const res = await runner.migrateScope("personal:alice", "sprites", "canary", {
+      provisioning: { provisioning, provisioningScopeId: "personal:session" },
+    });
     assert.equal(res.from, "aws");
     assert.equal(res.to, "sprites");
     assert.match(res.sha, /^[0-9a-f]{64}$/);
@@ -104,7 +107,9 @@ test("migrateScope copies $HOME, flips the route only after a verified copy, and
     assert.equal(route?.reason, "canary");
     assert.equal(aws.tornDown, 1);
     assert.equal(sprites.tornDown, 1);
-    const back = await runner.migrateScope("personal:alice", "aws", undefined, { provisioning });
+    const back = await runner.migrateScope("personal:alice", "aws", undefined, {
+      provisioning: { provisioning, provisioningScopeId: "personal:session" },
+    });
     assert.equal(back.from, "sprites");
     assert.equal((await routes.get("personal:alice"))?.backend, "aws");
   } finally {

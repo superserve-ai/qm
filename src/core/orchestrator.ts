@@ -2303,7 +2303,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
           sandbox: deps.sandbox,
           sandboxResources: deps.sandboxResources,
           ...(deps.sandboxMigration ? { sandboxMigration: deps.sandboxMigration, invalidateProvision } : {}),
-          ...(deps.sandboxProvisioning ? { sandboxProvisioning: deps.sandboxProvisioning(input) } : {}),
+          ...(deps.sandboxProvisioning
+            ? { sandboxProvisioning: { provisioning: deps.sandboxProvisioning(input), provisioningScopeId: scopeId } }
+            : {}),
           provision,
           provisionScratch,
           provisionResource,

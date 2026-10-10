@@ -44,7 +44,7 @@ interface MigrateScopeOptions {
   copyTimeoutSec?: number;
   strategy?: "copy" | "snapshot";
   resumeBlobId?: string;
-  provisioning?: ProvisionOptions["provisioning"];
+  provisioning?: Pick<ProvisionOptions, "provisioning" | "provisioningScopeId">;
 }
 
 export interface SandboxMigrationRunner {
@@ -100,7 +100,7 @@ export function createSandboxMigrationRunner(opts: SandboxMigrationOptions): San
     }
     const provOpts: ProvisionOptions = {
       ...(await opts.provisionOptions?.(scopeId)),
-      ...(migrateOpts?.provisioning ? { provisioning: migrateOpts.provisioning } : {}),
+      ...migrateOpts?.provisioning,
     };
     const fromHandle = await fromSandbox.provision(scopeLayers(scopeId), provOpts);
     const fromHome = fromHandle.homeDir ?? fromSandbox.profile.spec?.homeDir ?? "/root";

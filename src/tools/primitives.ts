@@ -449,7 +449,7 @@ export interface ToolContextDeps {
   context?: TurnContext;
   sharedMaterializeDir?: string;
   sandboxMigration?: SandboxMigrationRunner;
-  sandboxProvisioning?: ProvisionOptions["provisioning"];
+  sandboxProvisioning?: Pick<ProvisionOptions, "provisioning" | "provisioningScopeId">;
   sandboxResources?: SandboxResources;
   invalidateProvision?: () => void;
   migrateSettleMs?: number;

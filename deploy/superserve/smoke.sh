@@ -11,7 +11,7 @@ container="qm-tenant-smoke-$suffix"
 cleanup() {
   status=$?
   trap - EXIT
-  docker rm -f "$container" "$postgres" > /dev/null 2>&1 || true
+  docker rm -fv "$container" "$postgres" > /dev/null 2>&1 || true
   docker network rm "$network" > /dev/null 2>&1 || true
   exit "$status"
 }

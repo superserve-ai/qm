@@ -1,0 +1,58 @@
+name: qm-superserve
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: qm
+      POSTGRES_PASSWORD: qm
+      POSTGRES_DB: qm
+    ports:
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qm -d qm"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: qm-local
+      MINIO_ROOT_PASSWORD: qm-local-secret
+      MINIO_DOMAIN: minio
+    ports:
+      - "127.0.0.1:59000:9000"
+      - "127.0.0.1:59001:9001"
+    networks:
+      default:
+        aliases:
+          - minio
+          - qm-tenant.minio
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - miniodata:/data
+
+  minio-init:
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - mc alias set local http://minio:9000 qm-local qm-local-secret && mc mb --ignore-existing local/qm-tenant
+
+networks:
+  default:
+    name: qm-superserve
+
+volumes:
+  pgdata:
+  miniodata:

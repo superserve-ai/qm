@@ -92,6 +92,8 @@ spec:
           {{- end }}
           {{- if eq $name "web-ui" }}
           {{- $_ := set $wired "ADMIN_BASE_PATH" "/admin" }}
+          {{- end }}
+          {{- if or (eq $name "web-ui") (eq $name "portal") }}
           {{- $_ := set $wired "ADMIN_ENABLED" (ternary "1" "0" (index $root.Values.services "admin").enabled) }}
           {{- end }}
           {{- $componentEnv := deepCopy ($svc.env | default dict) }}

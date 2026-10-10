@@ -28,7 +28,7 @@ export function hostedServiceEnv(
 ): Record<string, string> {
   if (host === "core" || serviceHost(host) !== host) return { ...env[host as DeclaredServiceName] };
   const out: Record<string, string> =
-    host === "web-ui" ? { ADMIN_ENABLED: services.includes("admin") ? "1" : "0" } : {};
+    host === "web-ui" || host === "portal" ? { ADMIN_ENABLED: services.includes("admin") ? "1" : "0" } : {};
   for (const service of services.filter((name) => serviceHost(name) === host)) {
     for (const [name, value] of Object.entries(env[service] ?? {})) {
       if (name === "PORT") continue;

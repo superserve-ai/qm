@@ -217,10 +217,16 @@ needs `roles/iam.workloadIdentityUser` on the CI service account, and the CI ser
 
 Backing services and the tenant container run on the `qm-superserve` compose network. Postgres is also published on `127.0.0.1:55432` and MinIO on `127.0.0.1:59000` (console `59001`).
 
+Start the backing services and copy the example environment. `minio-init` is a one-shot bucket creator and exits 0.
+
 ```sh
-docker compose -f deploy/superserve/compose.yaml up -d   # minio-init is a one-shot bucket creator; it exits 0
+docker compose -f deploy/superserve/compose.yaml up -d
 cp deploy/superserve/env.example deploy/superserve/.env
-# fill the six *_SECRET values (openssl rand -hex 32); optionally the AUTH_* block for the broker
+```
+
+Fill the six `*_SECRET` values in `.env` with `openssl rand -hex 32`, and optionally the `AUTH_*` block for the broker, then start the tenant:
+
+```sh
 docker run --rm --name qm-tenant \
   --network qm-superserve -p 127.0.0.1:8080:8080 \
   --env-file deploy/superserve/.env qm-tenant:local

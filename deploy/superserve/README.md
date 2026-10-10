@@ -24,7 +24,7 @@ The provisioner must configure the Cloud Run service with CPU always allocated (
 Failure and shutdown:
 
 - If any child exits, the supervisor sends `SIGTERM` to the rest and exits `1`; Cloud Run restarts the container. Stragglers are `SIGKILL`ed after 3 s, or after core's full drain and lease-release window when core is one of them.
-- On `SIGTERM`/`SIGINT` the supervisor signals core first and keeps portal and web-ui serving until core has exited, so in-flight public requests are not reset while runs drain. Core drains workers for `SHUTDOWN_DRAIN_MS` (image default `1000`); if that stop wedges, core's own backstop fires 5 s later and it then spends up to 3 s releasing in-flight run leases. Core then allows up to 2 s to flush error reporting. The supervisor waits for that whole sequence plus 1 s before `SIGKILL`, then exits `0`. Allow at least `SHUTDOWN_DRAIN_MS + 11000` ms of platform termination grace (12 s with the image default). A platform with a shorter fixed grace period can interrupt the final shutdown steps.
+- On `SIGTERM`/`SIGINT` the supervisor signals core first and keeps portal and web-ui serving until core has exited, so in-flight public requests are not reset while runs drain. Core drains workers for `SHUTDOWN_DRAIN_MS` (image default `1000`); if that stop wedges, core's own backstop fires 5 s later and it then spends up to 3 s releasing in-flight run leases. Core flushes error reporting concurrently with that final lease-release window, allowing up to 2 s. The supervisor waits for that whole sequence plus 1 s before `SIGKILL`, then exits `0`. Allow at least `SHUTDOWN_DRAIN_MS + 9000` ms of platform termination grace (10 s with the image default). A platform with a shorter fixed grace period can interrupt the final shutdown steps.
 - The supervisor logs child lifecycle events only, prefixed `[tenant]`. It never prints environment values.
 
 Core and web-ui do not read a bind address from their environment (`server.listen(PORT)` in `src/index.ts` and `plugins/web-ui/server/index.ts`), so the supervisor preloads `scripts/qm-tenant-loopback.mjs` into those two children. It rewrites any `listen(port)` without an explicit host to `127.0.0.1`. Portal is started without the shim.
@@ -49,7 +49,7 @@ Web-ui and portal receive an allowlisted subset of the environment (their own `W
 
 The three port variables must each be a TCP port between 1 and 65535 and must differ from one
 another; `8099` is reserved as well, but only while the embedded broker is running. The two
-millisecond variables must fit a Node timer, and `SHUTDOWN_DRAIN_MS` leaves room for the eleven
+millisecond variables must fit a Node timer, and `SHUTDOWN_DRAIN_MS` leaves room for the nine
 seconds the supervisor adds on top so core can finish its own backstop and release in-flight
 run leases and flush error reporting. The supervisor rejects anything else at startup with exit code 2 rather than
 booting into a readiness timeout or killing core mid-drain.
@@ -169,9 +169,49 @@ With embedded auth off, portal expects an external OIDC provider and `OIDC_CLIEN
 docker build -f deploy/superserve/Dockerfile --build-arg GIT_SHA=$(git rev-parse HEAD) -t qm-tenant:local .
 ```
 
-The image follows `deploy/core/Dockerfile` and the plugin Dockerfiles: `node:24-alpine` (same digest), `npm ci --omit=dev` for core, web-ui and portal, a separate build stage for web-ui's Vite bundle, auth resolving its dependencies through portal's `node_modules`, non-root `node` user, `EXPOSE 8080`. It does not include `docker-cli` (no daemon in Cloud Run) and skips the `npm audit` step of the core image; run the audit in CI instead.
+The image follows `deploy/core/Dockerfile` and the plugin Dockerfiles: `node:24-alpine` (same digest), `npm ci --omit=dev` for core, web-ui and portal, a separate build stage for web-ui's Vite bundle, auth resolving its dependencies through portal's `node_modules`, non-root `node` user, `EXPOSE 8080`. It does not include `docker-cli` (no daemon in Cloud Run) and skips the `npm audit` step of the core image; the publish workflow runs that audit instead, over each of the three lockfiles this image installs from.
 
 Measured on this branch (Docker Desktop, Apple Silicon, local compose Postgres and MinIO): image size 671 MB; cold start from `docker run` to the first `200` on `/healthz`, migrations included, 13.8 to 14.4 s across three starts; killing the core child produced a container exit of `1` within 0.4 to 0.5 s; `docker stop` returned in about 0.5 s with exit `0` and the drain lines in the log.
+
+## Publishing
+
+`.github/workflows/publish-tenant-image.yml` publishes this image to Artifact Registry. It runs on a push of a release tag of the form `v<upstream version>-ss.<n>` (for example `v0.1.0-ss.3`), or by hand through `workflow_dispatch` run against such a tag — the tag has to be the run's own ref, because that is what the `release` environment's deployment rule is evaluated against. The `release` job checks that the run's ref is a tag of that form before anything else runs, so a dispatch from a branch — including one named like a tag — fails in seconds rather than after a full suite, and resolves it once to a commit SHA that the rest of the run is pinned to, so a tag moved mid-run cannot leave the tested and the published commit different. The `test` and `test-postgres` jobs run what the main CI workflow runs for everything the image embeds: the core typecheck, lint, the five root test shards, the Postgres-backed suite, and the typecheck, tests, and (for web-ui) build of the admin, auth, portal, and web-ui plugins. They also run `npm audit --omit=dev --audit-level=moderate` over the root, web-ui, and portal lockfiles, which is the audit the image's Dockerfile leaves to CI. A red suite blocks the `publish` job.
+
+Those jobs exercise the packages individually, so a `smoke` job additionally builds this Dockerfile and boots the resulting image against a throwaway Postgres, in production mode with embedded auth on: it waits for portal on the container port, then checks core, web-ui, the lazily imported admin module at `/admin/`, and the broker's JWKS on loopback inside the container. Embedded auth is part of the run because the broker resolves its dependencies through portal's `node_modules`, which is the most fragile thing the image does. `deploy/superserve/smoke.sh` is that check and runs the same way locally (it builds the image itself unless `TENANT_IMAGE` names one). It also verifies that requests without an agent capability remain blocked, invalid capabilities reach core authentication and are rejected, and a graceful stop exits successfully. Without it the single-container assembly and the supervisor would be the one thing published without ever being booted.
+
+The image is built exactly once, by the `smoke` job, for `linux/amd64` with `GIT_SHA` set to the tagged commit. It is exported to a tarball rather than to the registry, loaded, and booted; only a green boot uploads that tarball as a workflow artifact, alongside the loaded image id and the tarball's SHA-256. The artifact is kept for 35 days, because `publish` waits on the `release` environment's reviewer and GitHub lets a deployment sit pending for up to 30 days — a shorter retention would expire the tested image out from under a late approval. The extra days are slack: the artifact's retention starts when `smoke` uploads it, while the approval clock only starts once `test` and `test-postgres` have finished too, so the two windows are offset by however long the longest test job outlives the smoke job. The `publish` job builds nothing. It downloads that artifact, checks it against the recorded SHA-256, loads it, and stops unless the loaded image id is the one the smoke job booted — so the bytes that are pushed are the bytes that were tested. A second build would not do: the base image is pinned by digest, but `apk` and `npm` resolve against mutable upstreams, so a rebuild of the same commit can differ from the image the smoke job proved, and the tested artifact and the published artifact would be two different things. The tested image is then tagged and pushed as
+
+```
+<GCP_REGION>-docker.pkg.dev/<GCP_PROJECT>/superserve/qm-tenant:<tag>
+<GCP_REGION>-docker.pkg.dev/<GCP_PROJECT>/superserve/qm-tenant:<tag>-<short sha>
+```
+
+Both tags are pushed from that one image and the job fails if they do not resolve to the same digest. The run summary records both tags and the immutable `@sha256:` digest; the provisioner pins the digest.
+
+The workflow authenticates with Workload Identity Federation and needs, in the fork repository's Actions settings:
+
+| Kind     | Name                             | Value                                                                                                    |
+| -------- | -------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| secret   | `GCP_WORKLOAD_IDENTITY_PROVIDER` | `projects/<project number>/locations/global/workloadIdentityPools/github-pool/providers/github-provider` |
+| secret   | `GCP_SERVICE_ACCOUNT`            | the CI service account email                                                                             |
+| variable | `GCP_PROJECT`                    | the platform project id                                                                                  |
+| variable | `GCP_REGION`                     | `us-central1`                                                                                            |
+
+The `publish` job runs in the `release` environment, and the trust is bound to that environment rather than to the repository alone: anyone who can push a branch can otherwise dispatch a workflow that mints a repository-scoped token and writes to the registry without going through the tests. In the fork repository's Environments settings, `release` restricts deployments to the release tag pattern and requires a reviewer — the environment subject carries no ref of its own, so the tag restriction is what ties it to a release.
+
+On the GCP side, in the platform project: the `github-provider` provider in the `github-pool` pool must map `google.subject` to `assertion.sub` and carry the attribute condition
+
+```
+assertion.repository == "superserve-ai/qm" && assertion.sub == "repo:superserve-ai/qm:environment:release"
+```
+
+so a token minted by any other repository, branch, or job is rejected at the provider. That subject
+
+```
+principal://iam.googleapis.com/projects/<project number>/locations/global/workloadIdentityPools/github-pool/subject/repo:superserve-ai/qm:environment:release
+```
+
+needs `roles/iam.workloadIdentityUser` on the CI service account, and the CI service account needs `roles/artifactregistry.writer` on the `superserve` Artifact Registry repository only, not on the project.
 
 ## Running locally
 
@@ -202,7 +242,7 @@ Checks worth repeating after changes:
 curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/healthz     # 200 once portal is up
 curl -s localhost:8081/healthz                                        # connection refused: core is loopback only
 docker exec qm-tenant pkill -f /app/src/index.ts                      # kill core: container exits 1 within 5 s
-docker stop -t 20 qm-tenant                                           # drain log, exit 0
+docker stop -t 10 qm-tenant                                           # drain log, exit 0
 ```
 
 Tear down with `docker compose -f deploy/superserve/compose.yaml down -v`.

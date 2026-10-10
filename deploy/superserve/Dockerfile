@@ -57,7 +57,6 @@ ENV DATA_DIR=/data
 ENV SHUTDOWN_DRAIN_MS=1000
 ARG GIT_SHA=
 ENV GIT_SHA=$GIT_SHA
-# The AWS task runs as 10001:10001 on a read-only root with only /data and /tmp writable.
 RUN addgroup -g 10001 qm && adduser -D -H -u 10001 -G qm -h /data qm \
   && mkdir -p /data && chown qm:qm /data && chmod 1777 /tmp \
   && printf '#!/bin/sh\ncd /app && exec node scripts/qm-tenant-entry.mjs "$@"\n' > /usr/local/bin/qm-tenant-app \

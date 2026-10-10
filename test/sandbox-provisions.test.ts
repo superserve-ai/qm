@@ -204,7 +204,10 @@ test("explicit machine mode preserves ordinary keys and requires complete durabl
     () => loadConfig({ ...machine, SUPERSERVE_SANDBOX_HOST: undefined }),
     /require SUPERSERVE_SANDBOX_HOST/,
   );
-  assert.throws(() => loadConfig({ ...machine, SUPERSERVE_SANDBOX_HOST: " " }), /require SUPERSERVE_SANDBOX_HOST/);
+  for (const host of [" ", "127.0.0.1", "Sandbox.example.test", "sandbox.example.test:443"])
+    assert.throws(() => loadConfig({ ...machine, SUPERSERVE_SANDBOX_HOST: host }), /lowercase DNS suffix/, host);
+  assert.throws(() => loadConfig({ ...machine, SUPERSERVE_MACHINE_CREDENTIAL: "root token" }), /printable/);
+  assert.throws(() => loadConfig({ ...machine, SUPERSERVE_MACHINE_CREDENTIAL: "" }), /printable/);
   assert.equal(
     loadConfig({ ...machine, SUPERSERVE_BASE_URL: "https://api-usw.superserve.ai", SUPERSERVE_SANDBOX_HOST: undefined })
       .superserveSandbox.sandboxHost,

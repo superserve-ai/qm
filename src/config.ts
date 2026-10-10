@@ -1093,6 +1093,16 @@ function modelProviderEnvStrict(env: NodeJS.ProcessEnv): ModelProvider | undefin
   return declared;
 }
 
+function isSandboxDnsSuffix(host: string): boolean {
+  if (!/^(?=.{1,189}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(host))
+    return false;
+  try {
+    return new URL(`https://boxd-validation.${host}`).hostname === `boxd-validation.${host}`;
+  } catch {
+    return false;
+  }
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const sandboxIdentity = verifiedSandboxIdentity(env);
   if (env.SUPERSERVE_AUTH !== undefined && env.SUPERSERVE_AUTH !== "machine")
@@ -1100,8 +1110,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (env.SUPERSERVE_AUTH === "machine" && env.SUPERSERVE_MACHINE_CREDENTIAL === undefined)
     throw new Error("SUPERSERVE_AUTH=machine requires SUPERSERVE_MACHINE_CREDENTIAL");
   if (env.SUPERSERVE_MACHINE_CREDENTIAL !== undefined) {
-    if (!env.SUPERSERVE_MACHINE_CREDENTIAL.trim() || env.SUPERSERVE_API_KEY !== undefined)
-      throw new Error("SUPERSERVE_MACHINE_CREDENTIAL must be nonempty and cannot be combined with SUPERSERVE_API_KEY");
+    if (!/^[\x21-\x7e]+$/.test(env.SUPERSERVE_MACHINE_CREDENTIAL) || env.SUPERSERVE_API_KEY !== undefined)
+      throw new Error(
+        "SUPERSERVE_MACHINE_CREDENTIAL must be printable without whitespace and cannot be combined with SUPERSERVE_API_KEY",
+      );
     let endpoint: URL;
     try {
       endpoint = new URL(env.SUPERSERVE_BASE_URL ?? "");
@@ -1122,8 +1134,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       "https://api-usw.superserve.ai",
       "https://api-staging.superserve.ai",
     ].includes(endpoint.origin);
-    if (env.SUPERSERVE_SANDBOX_HOST === undefined ? !knownOrigin : !env.SUPERSERVE_SANDBOX_HOST.trim())
+    if (env.SUPERSERVE_SANDBOX_HOST === undefined && !knownOrigin)
       throw new Error("Machine sandbox credentials on a custom SUPERSERVE_BASE_URL require SUPERSERVE_SANDBOX_HOST");
+    if (env.SUPERSERVE_SANDBOX_HOST !== undefined && !isSandboxDnsSuffix(env.SUPERSERVE_SANDBOX_HOST))
+      throw new Error("SUPERSERVE_SANDBOX_HOST must be a lowercase DNS suffix of at most 189 characters");
   }
   if (sandboxIdentity && !env.SUPERSERVE_MACHINE_CREDENTIAL?.trim())
     throw new Error("Verified sandbox identity requires SUPERSERVE_MACHINE_CREDENTIAL");

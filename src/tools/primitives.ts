@@ -7,7 +7,7 @@ import type { SandboxResources } from "../sandbox/sandbox-resources.ts";
 import { join } from "node:path";
 import { interpolateSplitEnv } from "../deployment/deployment-layer.ts";
 import type { CredentialPathSpec } from "../credentials/resident-paths.ts";
-import type { ComputerStatus, ExecResult, Sandbox, SandboxHandle } from "../sandbox/sandbox.ts";
+import type { ComputerStatus, ExecResult, ProvisionOptions, Sandbox, SandboxHandle } from "../sandbox/sandbox.ts";
 import { ROUTE_CACHE_TTL_MS, type SandboxBackendName } from "../sandbox/sandbox-routing.ts";
 import type { SandboxMigrationRunner } from "../sandbox/sandbox-migration-runner.ts";
 import { CapabilityUnsupportedError, hasParentPathSegment, supportsAgentComputerExport } from "../sandbox/sandbox.ts";
@@ -449,6 +449,7 @@ export interface ToolContextDeps {
   context?: TurnContext;
   sharedMaterializeDir?: string;
   sandboxMigration?: SandboxMigrationRunner;
+  sandboxProvisioning?: Pick<ProvisionOptions, "provisioning" | "provisioningScopeId">;
   sandboxResources?: SandboxResources;
   invalidateProvision?: () => void;
   migrateSettleMs?: number;
@@ -586,7 +587,14 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
               return { defaultSandboxId: input.sandboxId };
             }
             if (!input?.backend || !deps.provisionResource) throw new Error("create requires an available backend");
-            const record = await resources.create(deps.createdBy, writableScopeId, input.backend, input.name);
+            const record = await resources.create(
+              deps.createdBy,
+              writableScopeId,
+              input.backend,
+              input.name,
+              undefined,
+              deps.sandboxProvisioning,
+            );
             await deps.provisionResource(record.id);
             return record;
           },
@@ -654,6 +662,7 @@ export function createToolContext(deps: ToolContextDeps): ToolContext {
       try {
         const result = await runner.migrateScope(writableScopeId, to as SandboxBackendName, "agent-requested", {
           copyTimeoutSec: 1800,
+          ...(deps.sandboxProvisioning ? { provisioning: deps.sandboxProvisioning } : {}),
         });
         deps.auditLog?.record({
           at: Date.now(),

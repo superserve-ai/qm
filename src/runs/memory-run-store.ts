@@ -1,3 +1,4 @@
+import { createMemorySandboxProvisions } from "./sandbox-provisions.ts";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import type { EnqueueInput, EnqueueResult, ReapEvent, Run, RunDeliveryState, RunStore } from "./run-store.ts";
@@ -46,6 +47,7 @@ export function createMemoryRunStore(opts?: { maxClaims?: number }): MemoryRunti
   }
 
   const store: RunStore = {
+    sandboxProvisions: createMemorySandboxProvisions((runId) => runs.get(runId)),
     ...(Number.isFinite(maxClaims) ? { maxClaims } : {}),
 
     async enqueue({ sessionId, request, dedupKey, maxAttempts = 3 }: EnqueueInput): Promise<EnqueueResult> {
@@ -221,7 +223,10 @@ export function createMemoryRunStore(opts?: { maxClaims?: number }): MemoryRunti
 
     async withdraw(runId) {
       const run = runs.get(runId);
-      if (!run || run.status !== "pending") return false;
+      const attempts = run?.attempts;
+      const records = await store.sandboxProvisions!.list(runId);
+      if (!run || runs.get(runId) !== run || run.status !== "pending" || run.attempts !== attempts || records.length)
+        return false;
       runs.delete(runId);
       retryAfter.delete(runId);
       if (run.dedupKey) byKey.delete(run.dedupKey);
@@ -231,6 +236,15 @@ export function createMemoryRunStore(opts?: { maxClaims?: number }): MemoryRunti
     async steerQueued(queuedRunId, targetRunId, signal, signals) {
       const queued = runs.get(queuedRunId);
       const target = runs.get(targetRunId);
+      const attempts = queued?.attempts;
+      const records = await store.sandboxProvisions!.list(queuedRunId);
+      if (
+        runs.get(queuedRunId) !== queued ||
+        runs.get(targetRunId) !== target ||
+        queued?.attempts !== attempts ||
+        records.length
+      )
+        return false;
       if (!queued || queued.status !== "pending" || !target || isTerminal(target.status) || queuedRunId === targetRunId)
         return false;
       if ((queued.request.displayText ?? queued.request.text) !== signal.request?.text) return false;

@@ -941,6 +941,11 @@ test("agent37 is a deployment backend on every target and rejects unused Fly set
 });
 
 test("superserve backend requires the agent template in env.core", () => {
+  for (const SUPERSERVE_AUTH of ["", " machine ", "key"])
+    withConfig(
+      { sandbox: { backend: "superserve" }, env: { core: { SUPERSERVE_TEMPLATE: "qm-agent-1.0.0", SUPERSERVE_AUTH } } },
+      ({ path }) => assert.throws(() => loadConfigAt(path), /SUPERSERVE_AUTH must be "machine"/),
+    );
   withConfig({ sandbox: { backend: "superserve" } }, ({ path }) => {
     assert.throws(() => loadConfigAt(path), /superserve sandbox backend requires env.core.SUPERSERVE_TEMPLATE/);
   });

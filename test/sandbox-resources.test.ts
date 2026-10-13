@@ -834,3 +834,58 @@ test("resource activation honors scope defaults and preserves explicit legacy pr
   assert.equal(resources.defaultBackend("personal:new"), "modal");
   assert.equal(resources.defaultBackend("channel:new"), "sprites");
 });
+
+test("run-owned resource creation forwards trusted provisioning evidence and logical owner scope", async () => {
+  const provisioning = {
+    withProvision: async <T>(action: () => Promise<T>) => action(),
+    assertReady: async () => undefined,
+    beginCreate: async () => {
+      throw new Error("unexpected create");
+    },
+    reused: async () => undefined,
+  };
+  const { resources } = fixture((backend) => {
+    const provision = backend.provision.bind(backend);
+    backend.provision = async (layers, options) => {
+      assert.equal(options?.provisioning, provisioning);
+      assert.equal(options?.provisioningScopeId, "personal:alice");
+      assert.notEqual(layers[0]!.scopeId, options?.provisioningScopeId);
+      return provision(layers, options);
+    };
+  });
+  const created = await resources.create("alice", "personal:alice", "local", "fixture", undefined, { provisioning });
+  assert.equal(created.state, "ready");
+});
+
+test("turn provisioning retains its session scope when the writable layer is an environment", async () => {
+  const { backend } = fixture();
+  const provision = backend.provision.bind(backend);
+  backend.provision = async (layers, options) => {
+    assert.equal(layers[0]!.scopeId, "environment:shared-files");
+    assert.equal(options?.provisioningScopeId, "personal:alice");
+    assert.equal(options?.routeScopeId, undefined);
+    return provision(layers, options);
+  };
+  const turn = createTurnSandboxes({
+    deps: { sandbox: backend },
+    input: { origin: { kind: "user" } },
+    actor: { id: "alice", type: "internal" },
+    session: { id: "s" },
+    resolution: { layers: [{ scopeId: "environment:shared-files", mode: "rw", mountPath: "/" }] },
+    scopeId: "personal:alice",
+    memoryScopeId: "personal:alice",
+    transferId: "t",
+    turnSessionDir: "turn/s",
+    turnFilesDir: "turn/s/t",
+    connectorEnv: {},
+    ownerAuthAvailable: false,
+    ownerEnvCredentialIds: [],
+    credentialCutoverServices: [],
+    visibleSkills: [],
+    visibleSkillsForTurn: async () => [],
+    emitGapWork: () => {},
+    perf: { credsMs: 0 },
+  } as unknown as TurnSandboxContext);
+  await turn.provision();
+  await turn.reclaimBox();
+});

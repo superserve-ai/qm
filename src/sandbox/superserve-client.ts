@@ -76,12 +76,14 @@ export interface SuperserveClient {
   kill(sandboxId: string): Promise<void>;
 }
 
-export interface SdkSuperserveClientOptions {
-  apiKey: string;
-  baseUrl?: string;
+export type SdkSuperserveClientOptions = (
+  | { apiKey: string; machineCredential?: never; baseUrl?: string }
+  | { machineCredential: string; apiKey?: never; baseUrl: string }
+) & {
   template?: string;
+  sandboxHost?: string;
   maxCommandMs?: number;
-}
+};
 
 const DEFAULT_MAX_COMMAND_MS = 3600_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
@@ -106,7 +108,19 @@ function isGoneError(err: unknown): boolean {
 
 export function createSdkSuperserveClient(opts: SdkSuperserveClientOptions): SuperserveClient {
   const maxCommandMs = opts.maxCommandMs ?? DEFAULT_MAX_COMMAND_MS;
-  const connection = { apiKey: opts.apiKey, ...(opts.baseUrl ? { baseUrl: opts.baseUrl } : {}) };
+  if (
+    opts.machineCredential !== undefined &&
+    (!opts.machineCredential.trim() || opts.apiKey !== undefined || !opts.baseUrl)
+  )
+    throw new Error("Machine sandbox authentication requires one explicit credential and endpoint");
+  const connection =
+    opts.machineCredential !== undefined
+      ? {
+          machineCredential: opts.machineCredential,
+          baseUrl: opts.baseUrl,
+          ...(opts.sandboxHost !== undefined ? { sandboxHost: opts.sandboxHost } : {}),
+        }
+      : { apiKey: opts.apiKey, ...(opts.baseUrl ? { baseUrl: opts.baseUrl } : {}) };
 
   type Sdk = typeof import("@superserve/sdk");
   let sdk: Promise<Sdk> | null = null;

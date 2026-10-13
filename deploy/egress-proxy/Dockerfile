@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends iptables && rm 
 WORKDIR /app
 
 COPY package.json package-lock.json ./
+COPY deploy/superserve/vendor ./deploy/superserve/vendor
 COPY .husky/install.mjs .husky/install.mjs
 RUN npm ci --omit=dev
 

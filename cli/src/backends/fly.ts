@@ -1026,6 +1026,15 @@ function unsetDisabledFlyPublisherToken(config: QmConfig, appPrefix: string): vo
   note(`removed the disabled Fly app publisher token from ${app}`);
 }
 
+function unsetInactiveSuperserveCredential(config: QmConfig, appPrefix: string): void {
+  const inactive =
+    config.env.core?.SUPERSERVE_AUTH === "machine" ? "SUPERSERVE_API_KEY" : "SUPERSERVE_MACHINE_CREDENTIAL";
+  const app = `${appPrefix}-core`;
+  if (!secretNames(app)?.has(inactive)) return;
+  fly(["secrets", "unset", "--stage", "-a", app, inactive]);
+  note(`removed the inactive ${inactive} from ${app}`);
+}
+
 function unsetCorelessPluginCoreSecrets(plugins: ResolvedPlugin[], appPrefix: string): string[] {
   const changed: string[] = [];
   for (const plugin of plugins) {
@@ -1185,6 +1194,7 @@ export async function flyUp(config: QmConfig, configDir: string, opts: FlyUpOpts
     if (services.includes("core")) {
       unsetDisabledSecurityScreenToken(config, ctx.appPrefix);
       unsetDisabledFlyPublisherToken(config, ctx.appPrefix);
+      unsetInactiveSuperserveCredential(config, ctx.appPrefix);
     }
     unsetCorelessPluginCoreSecrets(plugins, ctx.appPrefix);
 
@@ -1695,6 +1705,7 @@ export async function flySecretsPush(config: QmConfig, configDir: string, envFil
   for (const plugin of pluginNames) ensureApp(`${prefix}-${plugin}`, ctx.flyOrg, ctx.orgId, ctx.appPrefix);
   unsetDisabledSecurityScreenToken(config, prefix);
   unsetDisabledFlyPublisherToken(config, prefix);
+  unsetInactiveSuperserveCredential(config, prefix);
   unsetCorelessPluginCoreSecrets(plugins, prefix);
   const stagedApps = new Set<string>();
   for (const secret of operatorSecrets) {

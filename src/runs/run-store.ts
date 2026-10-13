@@ -1,3 +1,4 @@
+import type { RunSandboxProvisionStore } from "./sandbox-provisions.ts";
 import type { SubscribeOptions } from "../util/event-bus.ts";
 import type { RunSignal, RunSignalStore } from "./run-signal-store.ts";
 import type { TurnResult } from "../types.ts";
@@ -51,6 +52,7 @@ export interface EnqueueResult {
 }
 
 export interface RunStore {
+  sandboxProvisions?: RunSandboxProvisionStore;
   readonly maxClaims?: number;
 
   subscribeAvailable?(listener: () => void, options?: SubscribeOptions & { pollMs?: number }): () => void;

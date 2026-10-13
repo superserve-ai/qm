@@ -144,6 +144,7 @@ test("tracked files use only QM branding", () => {
     .split("\0")
     .filter(Boolean)
     .filter((path) => !path.startsWith("deploy/layers/"))
+    .filter((path) => !/^deploy\/superserve\/vendor\/.*\.tgz$/.test(path))
     .filter((path) => !provisionedInfrastructure.includes(path));
   const legacyPaths = paths.filter((path) => findLegacyNames(path, { path: true }).length > 0);
   const legacyContent = paths.flatMap((path) => {

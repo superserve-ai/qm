@@ -1,3 +1,5 @@
+import { createMemoryRunStore } from "../src/runs/memory-run-store.ts";
+import { createRunSandboxProvisioning } from "../src/sandbox/provisioning-evidence.ts";
 import { test, afterEach, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -968,4 +970,265 @@ test("run refuses to execute when its workspace directory is missing", async () 
   const result = await sandbox.run(handle, "echo should-not-run");
   assert.notEqual(result.code, 0);
   assert.equal(result.stdout, "");
+});
+
+async function provisioningFixture() {
+  const { runs } = createMemoryRunStore();
+  const { run } = await runs.enqueue({
+    sessionId: "receipt-session",
+    request: {
+      actor: { id: "tester", type: "internal" },
+      conversation: { kind: "dm", threadRef: "receipt-session", audience: [] },
+      text: "fixture",
+      origin: { kind: "direct" },
+    },
+  });
+  const claimed = (await runs.claim("worker", 60_000))!;
+  const evidence = createRunSandboxProvisioning({
+    runs,
+    runId: run.id,
+    runLeaseToken: claimed.leaseToken!,
+    attempt: 1,
+    identity: {
+      tenantId: "tenant",
+      teamId: "team",
+      machinePrincipalId: "machine",
+      manifestId: "manifest",
+      releaseImage: "fixture-image",
+    },
+    onChange: () => undefined,
+  });
+  return { runs, runId: run.id, evidence, receipts: () => runs.sandboxProvisions!.list(run.id) };
+}
+
+test("provisioning evidence commits creation before preparation and distinguishes cached reuse", async () => {
+  const f = await provisioningFixture();
+  sandbox = make({ requireProvisioningEvidence: true });
+  const create = fake.client.create;
+  fake.client.create = async (options) => {
+    assert.equal((await f.receipts())[0]!.outcome, "pending");
+    return create(options);
+  };
+  fake.beforeNextRun(async () => {
+    assert.equal((await f.receipts())[0]!.outcome, "created");
+  });
+  const handle = await sandbox.provision(layers, { provisioning: f.evidence });
+  await sandbox.provision(layers, { provisioning: f.evidence });
+  const records = await f.receipts();
+  assert.deepEqual(
+    records.map((record) => record.outcome),
+    ["created", "reused"],
+  );
+  assert.equal(records[0]!.providerSandboxId, handle.providerSandboxId);
+  assert.equal(records[1]!.reusedProvenance, "cached");
+  assert.equal(fake.createdCount(scopeName()), 1);
+});
+
+test("provisioning evidence rejects missing recorder and pending write failure before provider creation", async () => {
+  const f = await provisioningFixture();
+  sandbox = make({ requireProvisioningEvidence: true });
+  await assert.rejects(sandbox.provision(layers), /provisioning evidence/);
+  f.runs.sandboxProvisions!.begin = async () => {
+    throw new Error("durable write failed");
+  };
+  await assert.rejects(sandbox.provision(layers, { provisioning: f.evidence }), /durable write failed/);
+  assert.equal(fake.createdCount(scopeName()), 0);
+});
+
+test("provisioning evidence leaves response loss uncertain and blocks another create", async () => {
+  const f = await provisioningFixture();
+  sandbox = make({ requireProvisioningEvidence: true });
+  const create = fake.client.create;
+  fake.client.create = async (options) => {
+    await create(options);
+    throw new Error("provider response lost");
+  };
+  await assert.rejects(sandbox.provision(layers, { provisioning: f.evidence }), /provisioning evidence/);
+  await assert.rejects(sandbox.provision(layers, { provisioning: f.evidence }), /provisioning evidence/);
+  const records = await f.receipts();
+  assert.equal(records[0]!.outcome, "uncertain");
+  assert.equal(records[0]!.providerSandboxId, undefined);
+  assert.equal(fake.createdCount(scopeName()), 1);
+  assert.equal(fake.execScripts().length, 0);
+});
+
+test("provisioning evidence preserves confirmed create when later preparation fails", async () => {
+  const f = await provisioningFixture();
+  sandbox = make({ requireProvisioningEvidence: true });
+  fake.beforeNextRun(async () => {
+    throw new Error("preparation failed");
+  });
+  await assert.rejects(sandbox.provision(layers, { provisioning: f.evidence }), /preparation failed/);
+  const records = await f.receipts();
+  assert.equal(records[0]!.outcome, "created");
+  assert.equal(records[0]!.providerSandboxId, fake.current(scopeName())!.id);
+});
+
+test("provisioning evidence blocks execution and retry after a confirmation write fails", async () => {
+  const f = await provisioningFixture();
+  sandbox = make({ requireProvisioningEvidence: true });
+  f.runs.sandboxProvisions!.confirm = async () => {
+    throw new Error("confirmation write failed");
+  };
+  await assert.rejects(sandbox.provision(layers, { provisioning: f.evidence }), /provisioning evidence/);
+  await assert.rejects(sandbox.provision(layers, { provisioning: f.evidence }), /provisioning evidence/);
+  assert.equal((await f.receipts())[0]!.outcome, "pending");
+  assert.equal(fake.createdCount(scopeName()), 1);
+  assert.equal(fake.execScripts().length, 0);
+});
+
+test("verified maintenance reconnects an existing sandbox without creating or replacing one", async () => {
+  const f = await provisioningFixture();
+  const store: DurableMap<StoredSuperserveSandbox> = createMemoryMap();
+  sandbox = make({ store, requireProvisioningEvidence: true });
+  const first = await sandbox.provision(layers, { provisioning: f.evidence });
+  const maintenance = make({ store, requireProvisioningEvidence: true });
+  const handle = await maintenance.provision(layers);
+  assert.equal(handle.providerSandboxId, first.providerSandboxId);
+  assert.equal(fake.createdCount(scopeName()), 1);
+  assert.equal((await f.receipts()).length, 1);
+  const changedTemplate = make({ store, requireProvisioningEvidence: true, template: "replacement" });
+  await assert.rejects(changedTemplate.provision(layers), /provisioning evidence/);
+  assert.equal(fake.current(scopeName())!.id, first.providerSandboxId);
+  fake.expire(scopeName());
+  await assert.rejects(maintenance.provision(layers), /provisioning evidence/);
+  assert.equal(fake.createdCount(scopeName()), 1);
+});
+
+test("provisioning evidence stops preparation after lease loss during adoption", async () => {
+  const f = await provisioningFixture();
+  const inner: DurableMap<StoredSuperserveSandbox> = createMemoryMap();
+  sandbox = make({
+    requireProvisioningEvidence: true,
+    store: {
+      ...inner,
+      async put(key: string, value: StoredSuperserveSandbox) {
+        await inner.put(key, value);
+        const run = (await f.runs.get(f.runId))!;
+        await f.runs.releaseLease(f.runId, run.leaseToken!);
+        await f.runs.claimById(f.runId, "next-worker", 60_000);
+      },
+    },
+  });
+  await assert.rejects(sandbox.provision(layers, { provisioning: f.evidence }), /provisioning evidence/);
+  assert.equal(fake.execScripts().length, 0);
+  assert.equal((await f.receipts())[0]!.outcome, "created");
+  assert.equal((await f.receipts())[0]!.attempt, 1);
+  assert.equal((await f.runs.get(f.runId))!.attempts, 2);
+});
+
+test("provisioning evidence checks the lease after waiting for the scope lock", async () => {
+  await sandbox.provision(layers);
+  const f = await provisioningFixture();
+  const entered = Promise.withResolvers<void>();
+  const resume = Promise.withResolvers<void>();
+  sandbox = make({
+    requireProvisioningEvidence: true,
+    advisoryLock: {
+      async withLock(_key: string, action: () => Promise<unknown>) {
+        entered.resolve();
+        await resume.promise;
+        return action();
+      },
+    },
+  });
+  let providerCalls = 0;
+  const info = fake.client.info;
+  const list = fake.client.list;
+  fake.client.info = async (...args) => {
+    providerCalls++;
+    return info(...args);
+  };
+  fake.client.list = async (...args) => {
+    providerCalls++;
+    return list(...args);
+  };
+  const provisioning = sandbox.provision(layers, { provisioning: f.evidence });
+  const rejected = assert.rejects(provisioning, /provisioning evidence/);
+  await entered.promise;
+  const run = (await f.runs.get(f.runId))!;
+  await f.runs.releaseLease(f.runId, run.leaseToken!);
+  await f.runs.claimById(f.runId, "next-worker", 60_000);
+  resume.resolve();
+  await rejected;
+  assert.equal(providerCalls, 0);
+  assert.equal((await f.receipts()).length, 0);
+});
+
+test("same-run overlapping scopes wait for durable creation instead of failing on a live pending receipt", async () => {
+  const f = await provisioningFixture();
+  sandbox = make({ requireProvisioningEvidence: true });
+  const entered = Promise.withResolvers<void>();
+  const resume = Promise.withResolvers<void>();
+  const create = fake.client.create;
+  let creates = 0;
+  fake.client.create = async (options) => {
+    if (++creates === 1) {
+      entered.resolve();
+      await resume.promise;
+    }
+    return create(options);
+  };
+  const first = sandbox.provision(layers, { provisioning: f.evidence });
+  await entered.promise;
+  const second = sandbox.provision([{ ...layers[0]!, scopeId: scopeId("personal", "other") }], {
+    provisioning: f.evidence,
+  });
+  await delay(20);
+  assert.equal(creates, 1);
+  resume.resolve();
+  await Promise.all([first, second]);
+  assert.equal(creates, 2);
+  assert.deepEqual(
+    (await f.receipts()).map((r) => r.outcome),
+    ["created", "created"],
+  );
+});
+
+test("lease loss after scratch acquisition releases ownership before the next attempt", async () => {
+  const f = await provisioningFixture();
+  sandbox = make({ requireProvisioningEvidence: true });
+  const assertReady = f.evidence.assertReady;
+  let transferred = false;
+  f.evidence.assertReady = async () => {
+    if (!transferred && (await f.receipts())[0]?.outcome === "created") {
+      transferred = true;
+      const run = (await f.runs.get(f.runId))!;
+      await f.runs.releaseLease(f.runId, run.leaseToken!);
+      await f.runs.claimById(f.runId, "next-worker", 60_000);
+    }
+    await assertReady();
+  };
+  await assert.rejects(
+    sandbox.provision(layers, { provisioning: f.evidence, scratch: { key: "lease-loss" } }),
+    /provisioning evidence/,
+  );
+  const nextRun = (await f.runs.get(f.runId))!;
+  const { tenantId, teamId, machinePrincipalId, manifestId, releaseImage } = (await f.receipts())[0]!;
+  const nextEvidence = createRunSandboxProvisioning({
+    runs: f.runs,
+    runId: f.runId,
+    runLeaseToken: nextRun.leaseToken!,
+    attempt: nextRun.attempts,
+    identity: { tenantId, teamId, machinePrincipalId, manifestId, releaseImage },
+    onChange: () => undefined,
+  });
+  const handle = await sandbox.provision(layers, { provisioning: nextEvidence, scratch: { key: "lease-loss" } });
+  await sandbox.teardown(handle);
+  assert.equal(fake.current(handle.id), null);
+  assert.equal((await f.receipts())[0]!.outcome, "created");
+});
+
+test("environment-backed provisioning retains the logical run scope without changing provider routing", async () => {
+  const f = await provisioningFixture();
+  sandbox = make({ requireProvisioningEvidence: true });
+  const backing = "environment:shared-files";
+  await sandbox.provision([{ ...layers[0]!, scopeId: backing }], {
+    provisioning: f.evidence,
+    provisioningScopeId: scope,
+  });
+  const receipt = (await f.receipts())[0]!;
+  assert.equal(receipt.scopeId, scope);
+  assert.equal(receipt.backingScopeId, backing);
+  assert.equal(receipt.providerSandboxId, fake.current(sandboxScopeName("qmt", backing))!.id);
 });

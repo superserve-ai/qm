@@ -626,10 +626,14 @@ export function createTurnMethods(
       const replying = deps.turnStream?.replying(runId) ?? false;
       const replyComplete = deps.turnStream?.isReplyDone(runId) ?? false;
       const activity = await deps.runActivity?.list(runId);
+      const sandboxProvisions = await deps.runs.sandboxProvisions?.list(runId);
       const tasks = await deps.tasks?.list({ originRunId: runId });
       const stale =
         run.status === "pending" ? run.attempts > 0 : !alive && leaseLapsed(run, Date.now() - STALE_LEASE_GRACE_MS);
       return {
+        ...(sandboxProvisions?.length
+          ? { sandboxProvisioning: { version: 1 as const, receipts: sandboxProvisions } }
+          : {}),
         status: run.status,
         result: run.result ? await withAdminLink(run.result) : run.result,
         ...(run.request.surface === "web" &&

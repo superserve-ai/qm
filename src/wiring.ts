@@ -1,3 +1,4 @@
+import { createRunSandboxProvisioning } from "./sandbox/provisioning-evidence.ts";
 import { flushErrorReporting } from "../plugins/chassis/src/error-reporting.ts";
 import { createProductAnalytics } from "./util/product-analytics.ts";
 import { createAdmittedWork } from "./util/admitted-work.ts";
@@ -934,7 +935,8 @@ export function buildApp(
   const superserveEpochs = artifactMap<StoredConfigEpoch>("superserve_config_epochs");
   const buildSuperserve = (): Sandbox => {
     const ss = config.superserveSandbox;
-    if (!ss.apiKey) throw new Error("SANDBOX_BACKEND=superserve requires SUPERSERVE_API_KEY");
+    if (!ss.apiKey && !ss.machineCredential)
+      throw new Error("SANDBOX_BACKEND=superserve requires SUPERSERVE_API_KEY or SUPERSERVE_MACHINE_CREDENTIAL");
     if (!ss.template)
       throw new Error("SANDBOX_BACKEND=superserve requires SUPERSERVE_TEMPLATE (a ready qm-agent-<release> template)");
     const keepWarmSec = Math.ceil(config.backgroundJobTtlMaxMs / 1000);
@@ -955,12 +957,18 @@ export function buildApp(
       .digest("hex")
       .slice(0, 32);
     return createSuperserveSandbox(workspace, {
+      ...(config.verifiedSandboxIdentity ? { requireProvisioningEvidence: true } : {}),
       configEpoch:
         ss.configGeneration ??
         (pgArtifactMap ? createConfigEpochResolver(superserveEpochs, generationKey, advisoryLock) : 0),
       client: createSdkSuperserveClient({
-        apiKey: ss.apiKey,
-        ...(ss.baseUrl ? { baseUrl: ss.baseUrl } : {}),
+        ...(ss.machineCredential
+          ? {
+              machineCredential: ss.machineCredential,
+              baseUrl: ss.baseUrl!,
+              ...(ss.sandboxHost !== undefined ? { sandboxHost: ss.sandboxHost } : {}),
+            }
+          : { apiKey: ss.apiKey!, ...(ss.baseUrl ? { baseUrl: ss.baseUrl } : {}) }),
         ...(ss.template ? { template: ss.template } : {}),
       }),
       ...(ss.namePrefix ? { namePrefix: ss.namePrefix } : {}),
@@ -1765,6 +1773,17 @@ export function buildApp(
     },
   });
   const orchestratorDeps: OrchestratorDeps = {
+    ...(config.verifiedSandboxIdentity
+      ? {
+          sandboxProvisioning: (input) =>
+            createRunSandboxProvisioning({
+              runs,
+              identity: config.verifiedSandboxIdentity!,
+              ...input,
+              onChange: refreshRunStream,
+            }),
+        }
+      : {}),
     sessionSyscalls,
     refreshModels,
     identity,

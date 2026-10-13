@@ -1,3 +1,5 @@
+import { verifiedSandboxIdentity } from "./sandbox/verified-identity.ts";
+import type { VerifiedSandboxIdentity } from "./runs/sandbox-provisions.ts";
 import { isStrongSigningSecret } from "./auth/source-auth.ts";
 import { parseScopeId } from "./types.ts";
 import type { SandboxScopeDefaults } from "./sandbox/sandbox-routing.ts";
@@ -196,6 +198,7 @@ export interface Config {
   smolmachinesSandbox: SmolmachinesSandboxEnv;
   agent37Sandbox: Agent37SandboxEnv;
   superserveSandbox: SuperserveSandboxEnv;
+  verifiedSandboxIdentity?: VerifiedSandboxIdentity;
   e2bSandbox: E2bSandboxEnv;
   modalSandbox: ModalSandboxEnv;
   porterSandbox: PorterSandboxEnv;
@@ -604,7 +607,9 @@ function agent37SandboxEnv(env: NodeJS.ProcessEnv): Agent37SandboxEnv {
 
 interface SuperserveSandboxEnv {
   apiKey?: string;
+  machineCredential?: string;
   baseUrl?: string;
+  sandboxHost?: string;
   namePrefix?: string;
   template?: string;
   homeDir?: string;
@@ -635,7 +640,9 @@ function superserveSandboxEnv(env: NodeJS.ProcessEnv): SuperserveSandboxEnv {
   }
   return {
     ...(env.SUPERSERVE_API_KEY ? { apiKey: env.SUPERSERVE_API_KEY } : {}),
+    ...(env.SUPERSERVE_MACHINE_CREDENTIAL ? { machineCredential: env.SUPERSERVE_MACHINE_CREDENTIAL } : {}),
     ...(env.SUPERSERVE_BASE_URL?.trim() ? { baseUrl: env.SUPERSERVE_BASE_URL.trim() } : {}),
+    ...(env.SUPERSERVE_SANDBOX_HOST !== undefined ? { sandboxHost: env.SUPERSERVE_SANDBOX_HOST } : {}),
     ...(env.SUPERSERVE_NAME_PREFIX ? { namePrefix: env.SUPERSERVE_NAME_PREFIX } : {}),
     ...(env.SUPERSERVE_TEMPLATE?.trim() ? { template: env.SUPERSERVE_TEMPLATE.trim() } : {}),
     ...(env.SUPERSERVE_HOME_DIR ? { homeDir: env.SUPERSERVE_HOME_DIR } : {}),
@@ -942,7 +949,10 @@ export function enabledSandboxBackends(config: Config): Array<Config["sandboxBac
     sprites: Boolean(config.spritesSandbox?.token),
     smolmachines: Boolean(config.smolmachinesSandbox?.token),
     agent37: Boolean(config.agent37Sandbox?.apiKey),
-    superserve: Boolean(config.superserveSandbox?.apiKey && config.superserveSandbox?.template),
+    superserve: Boolean(
+      (config.superserveSandbox?.apiKey || config.superserveSandbox?.machineCredential) &&
+      config.superserveSandbox?.template,
+    ),
     e2b: Boolean(config.e2bSandbox?.apiKey),
     modal: Boolean(config.modalSandbox?.tokenId && config.modalSandbox?.tokenSecret),
     aws: Boolean(config.awsSandbox?.s3Bucket),
@@ -1083,7 +1093,54 @@ function modelProviderEnvStrict(env: NodeJS.ProcessEnv): ModelProvider | undefin
   return declared;
 }
 
+function isSandboxDnsSuffix(host: string): boolean {
+  if (!/^(?=.{1,189}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(host))
+    return false;
+  try {
+    return new URL(`https://boxd-validation.${host}`).hostname === `boxd-validation.${host}`;
+  } catch {
+    return false;
+  }
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  const sandboxIdentity = verifiedSandboxIdentity(env);
+  if (env.SUPERSERVE_AUTH !== undefined && env.SUPERSERVE_AUTH !== "machine")
+    throw new Error("SUPERSERVE_AUTH must be machine when set");
+  if (env.SUPERSERVE_AUTH === "machine" && env.SUPERSERVE_MACHINE_CREDENTIAL === undefined)
+    throw new Error("SUPERSERVE_AUTH=machine requires SUPERSERVE_MACHINE_CREDENTIAL");
+  if (env.SUPERSERVE_MACHINE_CREDENTIAL !== undefined) {
+    if (!/^[\x21-\x7e]+$/.test(env.SUPERSERVE_MACHINE_CREDENTIAL) || env.SUPERSERVE_API_KEY !== undefined)
+      throw new Error(
+        "SUPERSERVE_MACHINE_CREDENTIAL must be printable without whitespace and cannot be combined with SUPERSERVE_API_KEY",
+      );
+    let endpoint: URL;
+    try {
+      endpoint = new URL(env.SUPERSERVE_BASE_URL ?? "");
+    } catch {
+      throw new Error("Machine sandbox credentials require an explicit HTTPS SUPERSERVE_BASE_URL");
+    }
+    if (
+      endpoint.protocol !== "https:" ||
+      endpoint.username ||
+      endpoint.password ||
+      endpoint.pathname !== "/" ||
+      endpoint.search ||
+      endpoint.hash
+    )
+      throw new Error("Machine sandbox credentials require an explicit HTTPS SUPERSERVE_BASE_URL");
+    const knownOrigin = [
+      "https://api.superserve.ai",
+      "https://api-usw.superserve.ai",
+      "https://api-staging.superserve.ai",
+    ].includes(endpoint.origin);
+    if (env.SUPERSERVE_SANDBOX_HOST === undefined && !knownOrigin)
+      throw new Error("Machine sandbox credentials on a custom SUPERSERVE_BASE_URL require SUPERSERVE_SANDBOX_HOST");
+    if (env.SUPERSERVE_SANDBOX_HOST !== undefined && !isSandboxDnsSuffix(env.SUPERSERVE_SANDBOX_HOST))
+      throw new Error("SUPERSERVE_SANDBOX_HOST must be a lowercase DNS suffix of at most 189 characters");
+  }
+  if (sandboxIdentity && !env.SUPERSERVE_MACHINE_CREDENTIAL?.trim())
+    throw new Error("Verified sandbox identity requires SUPERSERVE_MACHINE_CREDENTIAL");
   if (env.BACKGROUND_DEPLOYMENT_ID !== undefined) {
     if (!env.BACKGROUND_DEPLOYMENT_ID.trim() || env.BACKGROUND_DEPLOYMENT_ID.length > 256)
       throw new Error("BACKGROUND_DEPLOYMENT_ID must be nonempty and at most 256 characters");
@@ -1202,7 +1259,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     );
   }
   const superserveEnabled =
-    superserveSelected || Boolean(env.SUPERSERVE_API_KEY?.trim() && env.SUPERSERVE_TEMPLATE?.trim());
+    superserveSelected ||
+    Boolean(
+      (env.SUPERSERVE_API_KEY?.trim() || env.SUPERSERVE_MACHINE_CREDENTIAL?.trim()) && env.SUPERSERVE_TEMPLATE?.trim(),
+    );
   if (superserveEnabled && env.NODE_ENV === "production" && !env.DATABASE_URL?.trim()) {
     throw new Error(
       "the superserve sandbox backend requires DATABASE_URL in production: the config generation and the provisioning lock have to be durable across instances, or a blue-green rollout can destroy a scope's resident disk.",
@@ -1281,6 +1341,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   let runStore: "memory" | "postgres" = env.SESSION_STORE === "postgres" ? "postgres" : "memory";
   if (env.RUN_STORE === "memory" || env.RUN_STORE === "postgres") runStore = env.RUN_STORE;
+  if (sandboxIdentity && (runStore !== "postgres" || !env.DATABASE_URL?.trim()))
+    throw new Error("Verified sandbox provisioning requires durable Postgres runs");
   const codexEnv = { ...env };
   if (codexOAuthConfigured && codexAuthCandidate) codexEnv.CODEX_AUTH_FILE = codexAuthCandidate;
   else delete codexEnv.CODEX_AUTH_FILE;
@@ -1556,6 +1618,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     smolmachinesSandbox: smolmachinesSandboxEnv(env),
     agent37Sandbox: agent37SandboxEnv(env),
     superserveSandbox: superserveSandboxEnv(env),
+    ...(sandboxIdentity ? { verifiedSandboxIdentity: sandboxIdentity } : {}),
     porterSandbox: porterSandboxEnv(env),
     porterDeploy: porterDeployEnv(env),
     e2bSandbox: e2bSandboxEnv(env),

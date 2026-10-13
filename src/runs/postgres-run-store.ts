@@ -1,3 +1,4 @@
+import { createPostgresSandboxProvisions, sandboxProvisionMigration } from "./postgres-sandbox-provisions.ts";
 import { createPostgresNotifyBus } from "../persistence/postgres-notify-bus.ts";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
@@ -52,7 +53,7 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
   const events = new EventEmitter();
   events.setMaxListeners(0);
 
-  const { query: q, close: closePool } = createPgPool(
+  const pg = createPgPool(
     connectionString,
     [
       {
@@ -117,6 +118,7 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
           `CREATE INDEX IF NOT EXISTS idx_runs_pending_child_returns ON runs(id) WHERE status IN ('done','failed') AND returned_at IS NULL AND session_id LIKE 'agent:main:subagent:%'`,
         ],
       },
+      sandboxProvisionMigration,
     ],
     [
       {
@@ -152,6 +154,8 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
       },
     ],
   );
+
+  const { query: q, close: closePool } = pg;
 
   const availabilityListeners = new Map<() => void, number>();
   let availabilityTimer: ReturnType<typeof setTimeout> | undefined;
@@ -260,6 +264,7 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
   }
 
   const runs: RunStore = {
+    sandboxProvisions: createPostgresSandboxProvisions(pg),
     subscribeAvailable(listener, options) {
       availabilityListeners.set(listener, options?.pollMs ?? 50);
       clearTimeout(availabilityTimer);
@@ -415,7 +420,10 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
     },
 
     async withdraw(runId: string): Promise<boolean> {
-      const { rowCount } = await q("DELETE FROM runs WHERE id = $1 AND status = 'pending'", [runId]);
+      const { rowCount } = await q(
+        "DELETE FROM runs WHERE id = $1 AND status = 'pending' AND NOT EXISTS (SELECT 1 FROM run_sandbox_provisions WHERE run_id=$1)",
+        [runId],
+      );
       return (rowCount ?? 0) > 0;
     },
 
@@ -426,6 +434,7 @@ export function createPostgresRunStore(connectionString: string, opts?: { maxCla
            SELECT id FROM runs WHERE id=$2 AND status IN ('pending','running') FOR UPDATE
          ), moved AS (
            DELETE FROM runs WHERE id=$1 AND id<>$2 AND status='pending'
+           AND NOT EXISTS (SELECT 1 FROM run_sandbox_provisions WHERE run_id=$1)
            AND COALESCE(request::jsonb->>'displayText',request::jsonb->>'text') = $5::jsonb->'request'->>'text'
            AND EXISTS (SELECT 1 FROM target) RETURNING id
          ), sent AS (

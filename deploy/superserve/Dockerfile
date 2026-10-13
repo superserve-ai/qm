@@ -22,6 +22,7 @@ RUN apk add --no-cache ca-certificates curl git git-daemon util-linux
 WORKDIR /app
 
 COPY package.json package-lock.json ./
+COPY deploy/superserve/vendor ./deploy/superserve/vendor
 COPY .husky/install.mjs .husky/install.mjs
 RUN npm ci --omit=dev && rm -rf /root/.npm /tmp/node-compile-cache
 

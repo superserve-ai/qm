@@ -89,7 +89,7 @@ Generate each secret with `openssl rand -hex 32`. In production core rejects pla
 | `AWS_SESSION_TOKEN`     | no       | For temporary credentials.                                                                  |
 | `AWS_REGION`            | no       | SDK default region; set it equal to `S3_REGION`.                                            |
 | `AWS_ENDPOINT_URL_S3`   | no       | S3-compatible endpoint (MinIO, R2, GCS interop). Buckets are addressed virtual-host style.  |
-| `DATA_DIR`              | no       | Scratch directory. Image default `/data`, owned by the `node` user.                         |
+| `DATA_DIR`              | no       | Scratch directory. Image default `/data`, owned by UID/GID `10001`.                         |
 | `DATABASE_CA_CERT`      | no       | Extra PEM root CA for the Postgres connection.                                              |
 | `DATABASE_POOL_URL`     | no       | Transaction-mode pooler URL.                                                                |
 | `DATABASE_POOL_CA_CERT` | no       | PEM CA for the pooler.                                                                      |
@@ -169,7 +169,7 @@ With embedded auth off, portal expects an external OIDC provider and `OIDC_CLIEN
 docker build -f deploy/superserve/Dockerfile --build-arg GIT_SHA=$(git rev-parse HEAD) -t qm-tenant:local .
 ```
 
-The image follows `deploy/core/Dockerfile` and the plugin Dockerfiles: `node:24-alpine` (same digest), `npm ci --omit=dev` for core, web-ui and portal, a separate build stage for web-ui's Vite bundle, auth resolving its dependencies through portal's `node_modules`, non-root `node` user, `EXPOSE 8080`. It does not include `docker-cli` (no daemon in Cloud Run) and skips the `npm audit` step of the core image; the publish workflow runs that audit instead, over each of the three lockfiles this image installs from.
+The image follows `deploy/core/Dockerfile` and the plugin Dockerfiles: `node:24-alpine` (same digest), `npm ci --omit=dev` for core, web-ui and portal, a separate build stage for web-ui's Vite bundle, auth resolving its dependencies through portal's `node_modules`, non-root UID/GID `10001` with `/data` and `/tmp` declared as volumes so the container runs on a read-only root, the `/usr/local/bin/qm-tenant-app` entrypoint (a wrapper around the supervisor that a platform launcher can exec by a fixed path), `EXPOSE 8080`. It does not include `docker-cli` (no daemon in Cloud Run) and skips the `npm audit` step of the core image; the publish workflow runs that audit instead, over each of the three lockfiles this image installs from.
 
 Measured on this branch (Docker Desktop, Apple Silicon, local compose Postgres and MinIO): image size 671 MB; cold start from `docker run` to the first `200` on `/healthz`, migrations included, 13.8 to 14.4 s across three starts; killing the core child produced a container exit of `1` within 0.4 to 0.5 s; `docker stop` returned in about 0.5 s with exit `0` and the drain lines in the log.
 

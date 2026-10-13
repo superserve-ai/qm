@@ -57,7 +57,11 @@ ENV DATA_DIR=/data
 ENV SHUTDOWN_DRAIN_MS=1000
 ARG GIT_SHA=
 ENV GIT_SHA=$GIT_SHA
-RUN mkdir -p /data && chown node:node /data
+RUN addgroup -g 10001 qm && adduser -D -H -u 10001 -G qm -h /data qm \
+  && mkdir -p /data && chown qm:qm /data && chmod 1777 /tmp \
+  && printf '#!/bin/sh\ncd /app && exec node scripts/qm-tenant-entry.mjs "$@"\n' > /usr/local/bin/qm-tenant-app \
+  && chmod 0755 /usr/local/bin/qm-tenant-app
+VOLUME ["/data", "/tmp"]
 EXPOSE 8080
-USER node
-ENTRYPOINT ["node", "scripts/qm-tenant-entry.mjs"]
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/qm-tenant-app"]

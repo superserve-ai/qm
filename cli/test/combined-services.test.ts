@@ -14,6 +14,7 @@ test("five logical components deploy as three services without losing core-only 
 
 test("combined settings preserve component configuration and reject conflicting values", () => {
   assert.deepEqual(hostedServiceEnv(["portal", "auth"], { portal: { A: "1" }, auth: { B: "2" } }, "portal"), {
+    ADMIN_ENABLED: "0",
     A: "1",
     B: "2",
   });
@@ -21,6 +22,12 @@ test("combined settings preserve component configuration and reject conflicting 
     () => hostedServiceEnv(["portal", "auth"], { portal: { A: "1" }, auth: { A: "2" } }, "portal"),
     /Conflicting A/,
   );
+});
+
+test("portal learns ADMIN_ENABLED alongside web-ui so it can gate /admin itself", () => {
+  assert.equal(hostedServiceEnv(["portal", "admin"], {}, "portal").ADMIN_ENABLED, "1");
+  assert.equal(hostedServiceEnv(["portal"], {}, "portal").ADMIN_ENABLED, "0");
+  assert.equal(hostedServiceEnv(["web-ui", "admin"], {}, "web-ui").ADMIN_ENABLED, "1");
 });
 
 test("broker stays private inside portal and keeps its public issuer and callback", () => {

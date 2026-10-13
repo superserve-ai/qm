@@ -417,12 +417,14 @@ export function stopWithBackstop(
   label: string,
   beforeExit?: () => void,
 ): void {
+  const finishCleanup = () =>
+    Promise.allSettled([
+      Promise.race([runtime.releaseInFlightRuns(), sleep(3_000, { unref: true })]),
+      flushErrorReporting(),
+    ]);
   const hardExit = setTimeout(() => {
     console.error(`[${label}] drain overran; releasing in-flight leases before forced exit`);
-    void Promise.race([runtime.releaseInFlightRuns(), sleep(3_000, { unref: true })]).finally(async () => {
-      await flushErrorReporting();
-      process.exit();
-    });
+    void finishCleanup().then(() => process.exit());
   }, shutdownDrainMs + 5_000);
   hardExit.unref();
   void runtime.stop().then(
@@ -435,10 +437,7 @@ export function stopWithBackstop(
     (e: unknown) => {
       console.error(`[${label}] graceful stop failed: ${errMessage(e)}`);
       clearTimeout(hardExit);
-      void Promise.race([runtime.releaseInFlightRuns(), sleep(3_000, { unref: true })]).finally(async () => {
-        await flushErrorReporting();
-        process.exit(1);
-      });
+      void finishCleanup().then(() => process.exit(1));
     },
   );
 }

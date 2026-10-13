@@ -6133,7 +6133,7 @@ test("controlled AWS cohorts bind immutable identities and hand over without ECS
   }
 });
 
-for (const mode of ["unchanged", "migration", "missing", "unstable", "failure"] as const) {
+for (const mode of ["unchanged", "migration", "missing", "admin", "unstable", "failure"] as const) {
   test(`AWS web routing transition gate: ${mode}`, async () => {
     const dir = mkdtempSync(join(tmpdir(), "qm-aws-web-routing-"));
     writeFileSync(join(dir, "docker"), `#!/usr/bin/env node\nconsole.log("Digest: sha256:${"a".repeat(64)}");\n`);
@@ -6167,6 +6167,10 @@ for (const mode of ["unchanged", "migration", "missing", "unstable", "failure"] 
           "http://admin.acme.local:8080";
       if (mode === "missing")
         portal.environment = portal.environment.filter((entry: { name: string }) => entry.name !== "ADMIN_UPSTREAM");
+      if (mode === "admin") {
+        const flag = portal.environment.find((entry: { name: string }) => entry.name === "ADMIN_ENABLED");
+        flag.value = flag.value === "1" ? "0" : "1";
+      }
       if (mode === "unstable") baseline.taskInventory["acme-web-ui"][0].desiredStatus = "STOPPED";
       if (mode === "failure") baseline.failNextWebRollout = true;
       writeFileSync(fake.state, JSON.stringify(baseline));
